@@ -92,18 +92,37 @@ Agent: [calls #listDiffComments] → sees 3 open comments
        [calls #resolveDiffComment] → marks each as done
 ```
 
-### Claude Code Integration (MCP)
-The extension includes an MCP server that Claude Code can connect to for real-time access to review comments.
+### MCP Server (Claude Code, Cursor, Windsurf, etc.)
+The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
 
-**Setup:**
+**Claude Code:**
 ```bash
-# Find the extension path (replace <version> with the installed version)
 # Windows:
 claude mcp add diff-review node "%USERPROFILE%\.vscode\extensions\jinqishen.diff-review-<version>\out\mcp-server.js"
 
 # macOS/Linux:
 claude mcp add diff-review node ~/.vscode/extensions/jinqishen.diff-review-<version>/out/mcp-server.js
 ```
+
+**Cursor:**
+Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "diff-review": {
+      "command": "node",
+      "args": ["<extension-path>/out/mcp-server.js"]
+    }
+  }
+}
+```
+
+**Other MCP clients:**
+Any client that supports the stdio transport can connect. The server binary is at:
+```
+<extension-install-path>/out/mcp-server.js
+```
+Run with: `node mcp-server.js` (stdio transport, no arguments needed).
 
 > **Note:** The VS Code extension must be running (window open and activated) for the MCP server to connect. The MCP server communicates with the extension via a local IPC server — comments are always live, no stale files.
 
