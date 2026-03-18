@@ -97,10 +97,15 @@ The extension includes an MCP server that Claude Code can connect to for real-ti
 
 **Setup:**
 ```bash
-claude mcp add diff-review node /path/to/diff-review/out/mcp-server.js
+# Find the extension path (replace <version> with the installed version)
+# Windows:
+claude mcp add diff-review node "%USERPROFILE%\.vscode\extensions\jinqishen.diff-review-<version>\out\mcp-server.js"
+
+# macOS/Linux:
+claude mcp add diff-review node ~/.vscode/extensions/jinqishen.diff-review-<version>/out/mcp-server.js
 ```
 
-The MCP server connects to the extension's IPC server — comments are always live (no stale files). Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
+> **Note:** The VS Code extension must be running (window open and activated) for the MCP server to connect. The MCP server communicates with the extension via a local IPC server — comments are always live, no stale files.
 
 ### Clipboard Support
 Every action that sends to Copilot also has a **Copy to Clipboard** variant — paste the structured prompt into Claude Code, Codex CLI, ChatGPT, or any AI:
