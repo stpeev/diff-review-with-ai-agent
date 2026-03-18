@@ -1,11 +1,170 @@
 # Diff Review for Copilot
 
-Add inline review comments on code changes and submit them to Copilot in batch.
+**Inline code review comments for VS Code — review AI-generated changes, submit feedback in batch, and let agents respond.**
 
-## Usage
+Add review comments on any line in any file, then submit them all to Copilot, Claude Code, or any AI agent as a structured prompt. Comments include surrounding code context and git diff hunks so the AI knows exactly what changed and what you want fixed. Perfect for reviewing Copilot Edits, PR changes, or any code modifications.
 
-1. Open any file in VS Code
-2. Hover on the line gutter → click the **+** icon to add a comment
-3. Type your feedback (e.g. "rename this variable", "add error handling")
-4. Repeat on other lines
-5. `Ctrl+Shift+P` → **Diff Review: Submit All to Copilot** to send all comments as a structured prompt
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+## Quick Start
+
+### 1. Add Review Comments
+Open any file → hover on the line gutter → click the **`+`** icon → type your feedback (e.g., "rename this variable", "add error handling") → click **Add Comment**.
+
+### 2. Review & Manage
+Click the **status bar** (`💬 2 open · 1 resolved`) to open the **comment panel** — search, filter, batch-resolve, or navigate to any comment.
+
+### 3. Submit to AI
+- **Send to Copilot** — click the 📤 button on any thread or use the comment panel to submit all
+- **Copy to Clipboard** — click 📋 to copy the structured prompt, then paste into Claude Code, Codex, or any AI chat
+- **MCP Server** — Claude Code connects directly via MCP for real-time comment interaction
+
+---
+
+## Features
+
+### Inline Commenting on Any File
+- **"+" gutter buttons** on every line — add comments on any file type (not just markdown)
+- **Threaded replies** with **👤 User** and **🤖 Agent** role badges
+- **Edit** comments inline, **resolve/reopen** threads, **delete** individual replies
+- **Send to Copilot** button directly on each thread's title bar
+- **Copy to Clipboard** button for pasting into any AI chat
+
+### Git Diff Context in Prompts
+When you submit comments, the prompt includes the **git diff hunk** for each commented line — showing what was added, removed, and changed. The AI sees both the current code and the change history:
+
+```
+### Line 15
+```
+→ 15 | const userData = await fetchUser(id);
+```
+**Git diff:**
+```diff
+@@ -13,5 +13,5 @@
+-const data = fetch('/api/user/' + id);
++const userData = await fetchUser(id);
+```
+**Comment:** Good rename, but add error handling for the await
+```
+
+### Comment Panel (Status Bar)
+Click the status bar to open an interactive panel with:
+- **Search/filter** — type to find comments by text or filename
+- **Global batch actions** — Submit All, Copy All, Resolve All, Delete Resolved, Clear All
+- **Per-file batch actions** — Submit, Copy, Resolve, Delete Resolved scoped to a single file
+- **Per-comment actions** — Go to, Send to Copilot, Copy, Resolve, Delete
+
+### Comment Persistence
+- Comments **survive window reloads** via VS Code workspace state
+- **Branch-scoped** — comments are stored per repository + branch
+- Switch branches → comments swap automatically
+- New branches **inherit** comments from the parent branch, then diverge independently
+
+### Line Tracking
+- Comments **follow the code** when lines are added or removed above them
+- CRLF-aware — works correctly on Windows with `\r\n` line endings
+
+### 4 Copilot Language Model Tools
+Enable in **Agent Mode → Tools** to let Copilot interact with your review comments:
+
+| Tool | Description |
+|---|---|
+| `#listDiffComments` | List all comments with IDs, file locations, status, and thread text |
+| `#replyToDiffComment` | Reply to a comment as the agent role |
+| `#resolveDiffComment` | Mark a comment as resolved/done |
+| `#deleteDiffComment` | Delete a comment thread |
+
+**Example workflow:**
+```
+User: "Address all my review comments"
+Agent: [calls #listDiffComments] → sees 3 open comments
+       [makes code changes based on feedback]
+       [calls #replyToDiffComment] → explains what was changed
+       [calls #resolveDiffComment] → marks each as done
+```
+
+### Claude Code Integration (MCP)
+The extension includes an MCP server that Claude Code can connect to for real-time access to review comments.
+
+**Setup:**
+```bash
+claude mcp add diff-review node /path/to/diff-review/out/mcp-server.js
+```
+
+The MCP server connects to the extension's IPC server — comments are always live (no stale files). Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
+
+### Clipboard Support
+Every action that sends to Copilot also has a **Copy to Clipboard** variant — paste the structured prompt into Claude Code, Codex CLI, ChatGPT, or any AI:
+- **Per-thread**: 📋 button on the thread title bar
+- **Per-file**: Copy action in the comment panel
+- **Global**: "Diff Review: Copy All to Clipboard" in the command palette
+
+---
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `Diff Review: Show Comments Panel` | Open the interactive comment panel |
+| `Diff Review: Submit All to Copilot` | Send all open comments to Copilot Chat |
+| `Diff Review: Copy All to Clipboard` | Copy all open comments as a structured prompt |
+| `Diff Review: Resolve All` | Resolve all open comments |
+| `Diff Review: Delete All Resolved` | Delete all resolved comments |
+| `Diff Review: Clear All Comments` | Delete all comments |
+
+---
+
+## Architecture
+
+```
+src/
+  extension.ts   — Comment controller, persistence, IPC server, Copilot tools
+  mcp-server.ts  — Standalone MCP server for Claude Code (connects to IPC)
+```
+
+**IPC Server**: The extension starts a local HTTP server on `127.0.0.1` (random port). The MCP server discovers the port via a temp file. All comment reads/writes go through the extension (single source of truth).
+
+**Branch Scoping**: Comments are stored under `diffReview.state.{repoName}.{branchName}` in VS Code's workspace state. Branch switches are detected via the git extension API.
+
+---
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Build extension + MCP server
+npm run build
+
+# Build extension only
+npm run build:ext
+
+# Build MCP server only
+npm run build:mcp
+
+# Package vsix
+npx @vscode/vsce package --no-dependencies --allow-missing-repository
+
+# Deploy to installed extension (dev shortcut)
+Copy-Item "out\extension.js" "$HOME\.vscode\extensions\jinqishen.diff-review-0.1.0\out\extension.js" -Force
+```
+
+---
+
+## Version History
+
+| Version | Highlights |
+|---|---|
+| **0.1.3** | Git diff context in prompts — AI sees what changed, not just current code |
+| **0.1.2** | Branch-scoped comment persistence — comments follow repo + branch, inherit on new branches |
+| **0.1.1** | Clipboard support, bug fixes (activation crash, comment rendering, CRLF line tracking) |
+| **0.1.0** | Initial release — inline comments, threaded replies, batch submit, comment panel, Copilot tools, MCP server, IPC, persistence, line tracking |
+
+---
+
+## License
+
+[MIT](LICENSE)
