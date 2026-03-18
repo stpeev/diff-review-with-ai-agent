@@ -1,4 +1,4 @@
-# Diff Review for Copilot
+# Diff Review with AI Agent
 
 **Inline code review comments for VS Code — review AI-generated changes, submit feedback in batch, and let agents respond.**
 

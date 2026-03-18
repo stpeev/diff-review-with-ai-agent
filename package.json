@@ -1,7 +1,7 @@
 {
   "name": "diff-review",
-  "displayName": "Diff Review for Copilot",
-  "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot or Claude Code, with git diff context",
+  "displayName": "Diff Review with AI Agent",
+  "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot, Claude Code, or any AI agent, with git diff context",
   "version": "0.2.0",
   "publisher": "JinqiShen",
   "icon": "icon.png",
