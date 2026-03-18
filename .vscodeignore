@@ -2,5 +2,9 @@
 .vscode-test
 node_modules
 src
+examples
 tsconfig.json
+gen-icon.js
 **/*.map
+**/*.ts
+.gitignore

@@ -1,14 +1,32 @@
 {
   "name": "diff-review",
   "displayName": "Diff Review for Copilot",
-  "description": "Add inline review comments on code changes and submit them to Copilot in batch",
-  "version": "0.1.0",
+  "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot or Claude Code, with git diff context",
+  "version": "0.2.0",
   "publisher": "JinqiShen",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jinqishen0725/diff-review"
+  },
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
+    "AI",
     "Other"
+  ],
+  "keywords": [
+    "code review",
+    "comments",
+    "copilot",
+    "diff",
+    "inline-comments",
+    "claude",
+    "mcp",
+    "agent",
+    "review",
+    "git"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -189,7 +207,10 @@
               "description": "The reply text to add to the thread"
             }
           },
-          "required": ["commentId", "text"]
+          "required": [
+            "commentId",
+            "text"
+          ]
         }
       },
       {
@@ -207,7 +228,9 @@
               "description": "The ID number of the comment thread to resolve"
             }
           },
-          "required": ["commentId"]
+          "required": [
+            "commentId"
+          ]
         }
       },
       {
@@ -225,7 +248,9 @@
               "description": "The ID number of the comment thread to delete"
             }
           },
-          "required": ["commentId"]
+          "required": [
+            "commentId"
+          ]
         }
       }
     ]
@@ -243,7 +268,8 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.93.0",
-    "typescript": "^5.0.0",
-    "esbuild": "^0.20.0"
+    "esbuild": "^0.20.0",
+    "sharp": "^0.34.5",
+    "typescript": "^5.0.0"
   }
 }
