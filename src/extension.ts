@@ -635,6 +635,40 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Copy single thread to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyThread', async (thread: vscode.CommentThread) => {
+            const prompt = await buildPrompt([thread]);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage('Comment prompt copied to clipboard.');
+        })
+    );
+
+    // --- Copy all open to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyAll', async () => {
+            const openThreads = [...threadMap.values()].filter(t => t.contextValue !== 'resolved');
+            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments to copy.'); return; }
+            const prompt = await buildPrompt(openThreads);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage(`${openThreads.length} comment(s) copied to clipboard.`);
+        })
+    );
+
+    // --- Copy file comments to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyFile', async (fileKey: string) => {
+            const byFile = getThreadsByFile();
+            const entries = byFile.get(fileKey);
+            if (!entries) return;
+            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
+            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
+            const prompt = await buildPrompt(openThreads);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage(`${openThreads.length} comment(s) from ${fileKey} copied to clipboard.`);
+        })
+    );
+
     // --- Register Copilot tools ---
     registerTools(context);
 }
@@ -667,6 +701,7 @@ async function showCommentPanel() {
         // Global actions (always shown)
         items.push(
             { label: '$(send) Submit All Open to Copilot', description: `${openCount} open`, action: 'submitAll' },
+            { label: '$(clippy) Copy All Open to Clipboard', description: `${openCount} open`, action: 'copyAll' },
             { label: '$(check-all) Resolve All', description: `${openCount} open`, action: 'resolveAll' },
             { label: '$(trash) Delete All Resolved', description: `${resolvedCount} resolved`, action: 'deleteResolved' },
             { label: '$(clear-all) Clear All', description: `${threadMap.size} total`, action: 'clearAll' },
@@ -697,6 +732,7 @@ async function showCommentPanel() {
             items.push({ label: `📁 ${file}  (${fileOpen} open, ${fileResolved} resolved)`, kind: vscode.QuickPickItemKind.Separator });
             items.push(
                 { label: `  $(send) Submit ${file}`, description: `${fileOpen} open`, action: 'submitFile', fileKey: file },
+                { label: `  $(clippy) Copy ${file}`, description: `${fileOpen} open`, action: 'copyFile', fileKey: file },
                 { label: `  $(check-all) Resolve ${file}`, description: `${fileOpen} open`, action: 'resolveFile', fileKey: file },
                 { label: `  $(trash) Delete Resolved in ${file}`, description: `${fileResolved} resolved`, action: 'deleteResolvedFile', fileKey: file },
             );
@@ -734,6 +770,9 @@ async function showCommentPanel() {
             case 'submitAll':
                 await vscode.commands.executeCommand('diffReview.submitAll');
                 break;
+            case 'copyAll':
+                await vscode.commands.executeCommand('diffReview.copyAll');
+                break;
             case 'resolveAll':
                 await vscode.commands.executeCommand('diffReview.resolveAll');
                 break;
@@ -745,6 +784,9 @@ async function showCommentPanel() {
                 break;
             case 'submitFile':
                 if (pick.fileKey) await vscode.commands.executeCommand('diffReview.submitFile', pick.fileKey);
+                break;
+            case 'copyFile':
+                if (pick.fileKey) await vscode.commands.executeCommand('diffReview.copyFile', pick.fileKey);
                 break;
             case 'resolveFile':
                 if (pick.fileKey) await vscode.commands.executeCommand('diffReview.resolveFile', pick.fileKey);
@@ -777,6 +819,7 @@ async function showCommentActions(threadId: number) {
     const items: ActionItem[] = [
         { label: '$(eye) Go to Comment', description: `${rel}:${line}`, action: 'goto' },
         { label: '$(send) Send to Copilot', description: 'Submit this comment as a prompt', action: 'send' },
+        { label: '$(clippy) Copy to Clipboard', description: 'Copy this comment as a prompt', action: 'copy' },
         { label: resolved ? '$(debug-restart) Reopen' : '$(check) Resolve', action: resolved ? 'unresolve' : 'resolve' },
         { label: '$(trash) Delete', action: 'delete' },
     ];
@@ -800,6 +843,9 @@ async function showCommentActions(threadId: number) {
         }
         case 'send':
             await vscode.commands.executeCommand('diffReview.sendThread', thread);
+            break;
+        case 'copy':
+            await vscode.commands.executeCommand('diffReview.copyThread', thread);
             break;
         case 'resolve':
             resolveThread(thread);

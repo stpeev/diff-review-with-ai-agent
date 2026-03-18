@@ -85,6 +85,16 @@
         "command": "diffReview.clearAll",
         "title": "Diff Review: Clear All Comments",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "diffReview.copyThread",
+        "title": "Copy to Clipboard",
+        "icon": "$(clippy)"
+      },
+      {
+        "command": "diffReview.copyAll",
+        "title": "Diff Review: Copy All to Clipboard",
+        "icon": "$(clippy)"
       }
     ],
     "menus": {
@@ -128,6 +138,11 @@
         {
           "command": "diffReview.sendThread",
           "group": "inline@1",
+          "when": "commentController == diffReview && !commentThreadIsEmpty"
+        },
+        {
+          "command": "diffReview.copyThread",
+          "group": "inline@2",
           "when": "commentController == diffReview && !commentThreadIsEmpty"
         },
         {
