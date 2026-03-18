@@ -14,17 +14,30 @@ interface CacheEntry<T> {
     expiry: number;
 }
 
+interface FetchDataOptions {
+    skipCache?: boolean;
+}
+
 const cache = new Map<string, CacheEntry<any>>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-export async function fetchData<T>(endpoint: string): Promise<T> {
+export async function fetchData<T>(endpoint: string, options?: FetchDataOptions): Promise<T> {
     // Check cache first
-    const cached = cache.get(endpoint);
-    if (cached && cached.expiry > Date.now()) {
-        return cached.data;
+    if (!options?.skipCache) {
+        const cached = cache.get(endpoint);
+        if (cached && cached.expiry > Date.now()) {
+            console.log(`[Cache] HIT: ${endpoint}`);
+            return cached.data;
+        }
     }
 
+    console.log(`[Fetch] ${endpoint}`);
     const response = await fetch(endpoint);
+
+    if (!response.ok) {
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
     const json: ApiResponse<T> = await response.json();
 
     // Cache the result
@@ -36,8 +49,15 @@ export async function fetchData<T>(endpoint: string): Promise<T> {
     return json.data;
 }
 
-export function transformData<T, R>(items: T[], transformer: (item: T) => R): R[] {
-    return items.map(transformer);
+export function transformData<T, R>(items: T[], transformer: (item: T, index: number) => R): R[] {
+    return items.map((item, index) => {
+        try {
+            return transformer(item, index);
+        } catch (err) {
+            console.error(`[Transform] Error at index ${index}:`, err);
+            throw err;
+        }
+    });
 }
 
 export function filterByDate<T extends { createdAt: string }>(

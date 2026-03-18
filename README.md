@@ -25,6 +25,8 @@ Click the **status bar** (`💬 2 open · 1 resolved`) to open the **comment pan
 
 ## Features
 
+![Inline Comments](examples/screenshot-inline.png)
+
 ### Inline Commenting on Any File
 - **"+" gutter buttons** on every line — add comments on any file type (not just markdown)
 - **Threaded replies** with **👤 User** and **🤖 Agent** role badges
@@ -50,6 +52,9 @@ When you submit comments, the prompt includes the **git diff hunk** for each com
 ```
 
 ### Comment Panel (Status Bar)
+
+![Comment Panel](examples/screenshot-panel.png)
+
 Click the status bar to open an interactive panel with:
 - **Search/filter** — type to find comments by text or filename
 - **Global batch actions** — Submit All, Copy All, Resolve All, Delete Resolved, Clear All
@@ -68,6 +73,8 @@ Click the status bar to open an interactive panel with:
 
 ### 4 Copilot Language Model Tools
 Enable in **Agent Mode → Tools** to let Copilot interact with your review comments:
+
+![Agent Reply](examples/screenshot-agent.png)
 
 | Tool | Description |
 |---|---|
