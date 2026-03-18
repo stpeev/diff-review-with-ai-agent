@@ -1,0 +1,234 @@
+{
+  "name": "diff-review",
+  "displayName": "Diff Review for Copilot",
+  "description": "Add inline review comments on code changes and submit them to Copilot in batch",
+  "version": "0.1.0",
+  "publisher": "JinqiShen",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "diffReview.createNote",
+        "title": "Add Comment",
+        "icon": "$(check)"
+      },
+      {
+        "command": "diffReview.reply",
+        "title": "Reply",
+        "icon": "$(reply)"
+      },
+      {
+        "command": "diffReview.editComment",
+        "title": "Edit",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "diffReview.saveEdit",
+        "title": "Save",
+        "icon": "$(check)"
+      },
+      {
+        "command": "diffReview.cancelEdit",
+        "title": "Cancel",
+        "icon": "$(close)"
+      },
+      {
+        "command": "diffReview.deleteNote",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "diffReview.sendThread",
+        "title": "Send to Copilot",
+        "icon": "$(send)"
+      },
+      {
+        "command": "diffReview.resolve",
+        "title": "Resolve",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "diffReview.unresolve",
+        "title": "Reopen",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "diffReview.showPanel",
+        "title": "Diff Review: Show Comments Panel",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "diffReview.submitAll",
+        "title": "Diff Review: Submit All to Copilot",
+        "icon": "$(send)"
+      },
+      {
+        "command": "diffReview.resolveAll",
+        "title": "Diff Review: Resolve All",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "diffReview.deleteResolved",
+        "title": "Diff Review: Delete All Resolved",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "diffReview.clearAll",
+        "title": "Diff Review: Clear All Comments",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "comments/commentThread/context": [
+        {
+          "command": "diffReview.createNote",
+          "group": "inline",
+          "when": "commentController == diffReview && commentThreadIsEmpty"
+        },
+        {
+          "command": "diffReview.reply",
+          "group": "inline",
+          "when": "commentController == diffReview && !commentThreadIsEmpty"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "diffReview.editComment",
+          "group": "inline@1",
+          "when": "commentController == diffReview && comment == userComment"
+        },
+        {
+          "command": "diffReview.deleteNote",
+          "group": "inline@2",
+          "when": "commentController == diffReview"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "diffReview.saveEdit",
+          "group": "inline@1",
+          "when": "commentController == diffReview"
+        },
+        {
+          "command": "diffReview.cancelEdit",
+          "group": "inline@2",
+          "when": "commentController == diffReview"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "diffReview.sendThread",
+          "group": "inline@1",
+          "when": "commentController == diffReview && !commentThreadIsEmpty"
+        },
+        {
+          "command": "diffReview.resolve",
+          "group": "inline@2",
+          "when": "commentController == diffReview && commentThread == open"
+        },
+        {
+          "command": "diffReview.unresolve",
+          "group": "inline@2",
+          "when": "commentController == diffReview && commentThread == resolved"
+        }
+      ]
+    },
+    "languageModelTools": [
+      {
+        "name": "diffReview_listComments",
+        "displayName": "List Diff Review Comments",
+        "toolReferenceName": "listDiffComments",
+        "icon": "$(comment)",
+        "modelDescription": "Lists all inline review comments with their IDs, file locations, status (open/resolved), and full thread text including user and agent replies. Use this to see what review feedback exists.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "diffReview_replyToComment",
+        "displayName": "Reply to Diff Review Comment",
+        "toolReferenceName": "replyToDiffComment",
+        "icon": "$(reply)",
+        "modelDescription": "Reply to an existing inline review comment thread. Use this to respond to user feedback on code changes, explain your reasoning, or acknowledge a requested change. The reply appears as an agent message in the comment thread.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "commentId": {
+              "type": "number",
+              "description": "The ID number of the comment thread to reply to (from listComments output, e.g. #1, #2)"
+            },
+            "text": {
+              "type": "string",
+              "description": "The reply text to add to the thread"
+            }
+          },
+          "required": ["commentId", "text"]
+        }
+      },
+      {
+        "name": "diffReview_resolveComment",
+        "displayName": "Resolve Diff Review Comment",
+        "toolReferenceName": "resolveDiffComment",
+        "icon": "$(check)",
+        "modelDescription": "Mark an inline review comment as resolved/done. Use this after you have addressed the feedback in the comment — e.g., after making the requested code change.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "commentId": {
+              "type": "number",
+              "description": "The ID number of the comment thread to resolve"
+            }
+          },
+          "required": ["commentId"]
+        }
+      },
+      {
+        "name": "diffReview_deleteComment",
+        "displayName": "Delete Diff Review Comment",
+        "toolReferenceName": "deleteDiffComment",
+        "icon": "$(trash)",
+        "modelDescription": "Delete an inline review comment thread entirely. Use this only when explicitly asked to remove a comment.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "commentId": {
+              "type": "number",
+              "description": "The ID number of the comment thread to delete"
+            }
+          },
+          "required": ["commentId"]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "build": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode && npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
+    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
+    "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
+    "package": "echo y | npx vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.0.0",
+    "esbuild": "^0.20.0"
+  }
+}
