@@ -131,9 +131,38 @@ function refresh() {
     }
 }
 
-// --------------- Persistence ---------------
+// --------------- Persistence (branch-scoped) ---------------
 
 let extensionContext: vscode.ExtensionContext;
+let activeController: vscode.CommentController | undefined;
+let currentBranchKey: string = '_default';
+let outputLog: vscode.OutputChannel;
+
+function getGitApi(): any | undefined {
+    const gitExtension = vscode.extensions.getExtension('vscode.git');
+    if (!gitExtension?.isActive) return undefined;
+    return gitExtension.exports.getAPI(1);
+}
+
+function getBranchKey(): string {
+    try {
+        const git = getGitApi();
+        if (!git) return '_default';
+        const repos = git.repositories;
+        if (!repos || repos.length === 0) return '_default';
+        // Use first repo (most common case)
+        const repo = repos[0];
+        const repoName = path.basename(repo.rootUri.fsPath);
+        const branch = repo.state?.HEAD?.name || '_detached';
+        return `${repoName}.${branch}`;
+    } catch {
+        return '_default';
+    }
+}
+
+function stateKey(branchKey?: string): string {
+    return `diffReview.state.${branchKey ?? currentBranchKey}`;
+}
 
 function serializeState(): SerializedState {
     const threads: SerializedThread[] = [];
@@ -159,11 +188,18 @@ function serializeState(): SerializedState {
 }
 
 function saveState() {
-    extensionContext.workspaceState.update('diffReview.state', serializeState());
+    extensionContext.workspaceState.update(stateKey(), serializeState());
 }
 
-function loadState(controller: vscode.CommentController) {
-    const data = extensionContext.workspaceState.get<SerializedState>('diffReview.state');
+function clearThreads() {
+    for (const thread of threadMap.values()) thread.dispose();
+    threadMap.clear();
+    nextThreadId = 1;
+    nextCommentId = 1;
+}
+
+function loadStateFromKey(controller: vscode.CommentController, key: string) {
+    const data = extensionContext.workspaceState.get<SerializedState>(stateKey(key));
     if (!data || !data.threads) return;
 
     nextThreadId = data.nextThreadId || 1;
@@ -188,6 +224,72 @@ function loadState(controller: vscode.CommentController) {
             thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
         }
         trackThread(thread, st.id);
+    }
+}
+
+function switchToBranch(controller: vscode.CommentController, newKey: string) {
+    if (newKey === currentBranchKey) return;
+
+    outputLog.appendLine(`[Diff Review] Branch switch: ${currentBranchKey} → ${newKey}`);
+
+    // Save current branch's comments
+    saveState();
+
+    // Clear current threads from UI
+    clearThreads();
+
+    const oldKey = currentBranchKey;
+    currentBranchKey = newKey;
+
+    // Try loading saved state for the new branch
+    const newData = extensionContext.workspaceState.get<SerializedState>(stateKey(newKey));
+
+    if (newData && newData.threads && newData.threads.length > 0) {
+        // New branch has its own saved comments — load them
+        loadStateFromKey(controller, newKey);
+        outputLog.appendLine(`[Diff Review] Loaded ${threadMap.size} comments for branch ${newKey}`);
+    } else {
+        // New branch has no saved comments — copy from the old branch (Option B)
+        loadStateFromKey(controller, oldKey);
+        if (threadMap.size > 0) {
+            // Save the copied state under the new branch key
+            saveState();
+            outputLog.appendLine(`[Diff Review] Inherited ${threadMap.size} comments from ${oldKey} to ${newKey}`);
+        } else {
+            outputLog.appendLine(`[Diff Review] No comments to inherit — clean slate for ${newKey}`);
+        }
+    }
+
+    refresh();
+}
+
+function setupBranchWatcher(context: vscode.ExtensionContext, controller: vscode.CommentController) {
+    try {
+        const git = getGitApi();
+        if (!git) {
+            outputLog.appendLine('[Diff Review] Git API not available — branch scoping disabled');
+            return;
+        }
+        for (const repo of git.repositories) {
+            repo.state.onDidChange(() => {
+                const newKey = getBranchKey();
+                if (newKey !== currentBranchKey) {
+                    switchToBranch(controller, newKey);
+                }
+            });
+        }
+        // Also watch for new repos being opened
+        git.onDidOpenRepository((repo: any) => {
+            repo.state.onDidChange(() => {
+                const newKey = getBranchKey();
+                if (newKey !== currentBranchKey) {
+                    switchToBranch(controller, newKey);
+                }
+            });
+        });
+        outputLog.appendLine(`[Diff Review] Branch watcher active, current: ${currentBranchKey}`);
+    } catch (e: any) {
+        outputLog.appendLine(`[Diff Review] Branch watcher setup failed: ${e.message}`);
     }
 }
 
@@ -364,10 +466,11 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 
 export function activate(context: vscode.ExtensionContext) {
     extensionContext = context;
-    const log = vscode.window.createOutputChannel('Diff Review');
-    log.appendLine('[Diff Review] Activating...');
+    outputLog = vscode.window.createOutputChannel('Diff Review');
+    outputLog.appendLine('[Diff Review] Activating...');
 
     const controller = vscode.comments.createCommentController('diffReview', 'Diff Review');
+    activeController = controller;
     context.subscriptions.push(controller);
 
     controller.commentingRangeProvider = {
@@ -387,23 +490,40 @@ export function activate(context: vscode.ExtensionContext) {
     statusBar.tooltip = 'Click to view review comments';
     context.subscriptions.push(statusBar);
 
-    // --- Load persisted state ---
+    // --- Detect current branch and load state ---
+    currentBranchKey = getBranchKey();
+    outputLog.appendLine(`[Diff Review] Current branch key: ${currentBranchKey}`);
+
+    // Migrate old unscoped state if it exists
+    const oldData = extensionContext.workspaceState.get<SerializedState>('diffReview.state');
+    if (oldData && oldData.threads && oldData.threads.length > 0) {
+        const scopedData = extensionContext.workspaceState.get<SerializedState>(stateKey());
+        if (!scopedData || !scopedData.threads || scopedData.threads.length === 0) {
+            extensionContext.workspaceState.update(stateKey(), oldData);
+            outputLog.appendLine(`[Diff Review] Migrated ${oldData.threads.length} threads from unscoped to ${currentBranchKey}`);
+        }
+        extensionContext.workspaceState.update('diffReview.state', undefined);
+    }
+
     try {
-        loadState(controller);
-        log.appendLine(`[Diff Review] Loaded ${threadMap.size} persisted threads`);
+        loadStateFromKey(controller, currentBranchKey);
+        outputLog.appendLine(`[Diff Review] Loaded ${threadMap.size} persisted threads for ${currentBranchKey}`);
     } catch (e: any) {
-        log.appendLine(`[Diff Review] Error loading state: ${e.message}`);
+        outputLog.appendLine(`[Diff Review] Error loading state: ${e.message}`);
     }
     refresh();
 
     // --- Line tracking ---
     setupLineTracking(context);
 
+    // --- Branch watcher ---
+    setupBranchWatcher(context, controller);
+
     // --- IPC Server ---
     startIpcServer(context).then(port => {
-        log.appendLine(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
+        outputLog.appendLine(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
     }).catch(err => {
-        log.appendLine(`[Diff Review] Failed to start IPC server: ${err}`);
+        outputLog.appendLine(`[Diff Review] Failed to start IPC server: ${err}`);
     });
 
     // --- Create comment (first comment in a new thread) ---
