@@ -1186,9 +1186,9 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     parts.push('---');
     parts.push('Apply every change above. Keep all other code unchanged.');
     parts.push('');
-    parts.push('After making the changes, use the following tools to respond:');
-    parts.push('- Use #replyToDiffComment (with commentId and text) to explain what you changed for each comment');
-    parts.push('- Use #resolveDiffComment (with commentId) to mark each comment as done');
+    parts.push('After making the changes, use the review tools to respond:');
+    parts.push('- Use replyToDiffComment (with commentId and text) to explain what you changed for each comment');
+    parts.push('- Use resolveDiffComment (with commentId) to mark each comment as done');
     return parts.join('\n');
 }
 
