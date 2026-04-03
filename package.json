@@ -2,7 +2,7 @@
   "name": "diff-review",
   "displayName": "Diff Review with AI Agent",
   "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot, Claude Code, or any AI agent, with git diff context",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "JinqiShen",
   "icon": "icon.png",
   "repository": {
