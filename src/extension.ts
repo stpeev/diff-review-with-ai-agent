@@ -345,7 +345,9 @@ function registerRepoWatcher(folder: FolderInfo, repo: any) {
 
 /** Called once a folder's scope/branch is known: sets `filePath`, loads its threads, flushes any deferred save. */
 function settleFolder(folder: FolderInfo) {
-    folder.filePath = path.join(scopeDirFor(folder.scopeId!), 'comments.json');
+    const filePath = path.join(scopeDirFor(folder.scopeId!), 'comments.json');
+    folder.filePath = filePath;
+    outputLog.appendLine(`[Diff Review] ${vscode.Uri.file(folder.folderPath).toString()}: storage resolved to ${vscode.Uri.file(filePath).toString()}`);
     migrateLegacyStateIfPresent(folder);
     loadFolderThreads(folder);
     refresh();
@@ -964,6 +966,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                             status: 'drifted', comments: rec.comments.map(c => ({ role: c.role, body: c.body })),
                         })),
                     ];
+                    outputLog.appendLine(`[Diff Review] Comments listed via IPC (${threads.length} thread(s))`);
                     res.writeHead(200);
                     res.end(JSON.stringify({ threads }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
@@ -977,6 +980,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         found.thread.comments = [...found.thread.comments, reply];
                         found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
                         touchThread(found.thread);
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
                         queueSaveForThread(found.thread);
                         res.writeHead(200);
                         res.end(JSON.stringify({ ok: true, commentId: reply.id }));
@@ -984,6 +988,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
                         found.rec.comments.push(comment);
                         found.rec.updatedAt = comment.timestamp;
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC, drifted) at ${found.rec.uri}`);
                         queueSaveForUri(vscode.Uri.parse(found.rec.uri));
                         res.writeHead(200);
                         res.end(JSON.stringify({ ok: true, commentId: comment.id, note: 'This thread is drifted — its original location was not found.' }));
@@ -997,10 +1002,12 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     if (found.kind === 'live') {
                         resolveThread(found.thread);
                         refresh();
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
                         queueSaveForThread(found.thread);
                     } else {
                         found.rec.status = 'resolved';
                         found.rec.updatedAt = new Date().toISOString();
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC, drifted) at ${found.rec.uri}`);
                         queueSaveForUri(vscode.Uri.parse(found.rec.uri));
                     }
                     res.writeHead(200);
@@ -1013,6 +1020,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
                     unresolveThread(thread);
                     refresh();
+                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (unresolved via IPC) at ${vscode.workspace.asRelativePath(thread.uri)}`);
                     queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
@@ -1026,9 +1034,11 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         threadMap.delete(threadId);
                         found.thread.dispose();
                         refresh();
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
                         queueSaveForUri(found.thread.uri);
                     } else {
                         driftedMap.delete(threadId);
+                        outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC (drifted) at ${found.rec.uri}`);
                         queueSaveForUri(vscode.Uri.parse(found.rec.uri));
                     }
                     res.writeHead(200);
@@ -1319,6 +1329,9 @@ export function activate(context: vscode.ExtensionContext) {
     extensionContext = context;
     outputLog = vscode.window.createOutputChannel('Diff Review');
     outputLog.appendLine('[Diff Review] Activating...');
+    const globalStoragePath = vscode.Uri.file(
+        context.globalStorageUri.fsPath.replace('vscode-userdata:', '')).toString()
+    outputLog.appendLine(`[Diff Review] Global storage: ${globalStoragePath}`);
 
     const controller = vscode.comments.createCommentController('diffReview', 'Diff Review');
     activeController = controller;
@@ -1372,7 +1385,8 @@ export function activate(context: vscode.ExtensionContext) {
             thread.label = 'Open';
             thread.contextValue = 'open';
             const anchor = computeAnchorForNewThread(thread);
-            trackThread(thread, undefined, anchor);
+            const tid = trackThread(thread, undefined, anchor);
+            outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             refresh();
             queueSaveForThread(thread);
         })
@@ -1385,6 +1399,7 @@ export function activate(context: vscode.ExtensionContext) {
             const comment = new ReviewComment(reply.text, 'user');
             thread.comments = [...thread.comments, comment];
             touchThread(thread);
+            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (reply added) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             queueSaveForThread(thread);
         })
     );
@@ -1419,6 +1434,7 @@ export function activate(context: vscode.ExtensionContext) {
                 return c;
             });
             touchThread(thread);
+            outputLog.appendLine(`[Diff Review] Comment #${comment.id} updated (edit saved) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             queueSaveForThread(thread);
         })
     );
@@ -1445,14 +1461,17 @@ export function activate(context: vscode.ExtensionContext) {
             const thread = findThreadForComment(comment.id);
             if (!thread) return;
             const uri = thread.uri;
+            const tid = threadIds.get(thread);
             if (thread.comments.length <= 1) {
                 untrackThread(thread);
                 thread.dispose();
+                outputLog.appendLine(`[Diff Review] Comment #${tid} deleted (last comment, thread removed) at ${vscode.workspace.asRelativePath(uri)}`);
             } else {
                 thread.comments = thread.comments.filter(
                     c => (c as ReviewComment).id !== comment.id
                 );
                 touchThread(thread);
+                outputLog.appendLine(`[Diff Review] Comment #${comment.id} deleted from thread #${tid} at ${vscode.workspace.asRelativePath(uri)}`);
             }
             refresh();
             queueSaveForUri(uri);
@@ -1477,6 +1496,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.resolve', (thread: vscode.CommentThread) => {
             resolveThread(thread);
             refresh();
+            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (resolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
             queueSaveForThread(thread);
         })
     );
@@ -1486,6 +1506,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.unresolve', (thread: vscode.CommentThread) => {
             unresolveThread(thread);
             refresh();
+            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (unresolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
             queueSaveForThread(thread);
         })
     );
@@ -2406,6 +2427,7 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
         _options: vscode.LanguageModelToolInvocationOptions<{}>,
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
+        outputLog.appendLine(`[Diff Review] Comments listed via LM tool (${threadMap.size} open, ${driftedMap.size} drifted)`);
         if (threadMap.size === 0 && driftedMap.size === 0) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('No review comments.')
@@ -2453,6 +2475,7 @@ class ReplyToCommentTool implements vscode.LanguageModelTool<ReplyParams> {
             found.thread.comments = [...found.thread.comments, reply];
             found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
             touchThread(found.thread);
+            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool) at ${vscode.workspace.asRelativePath(found.thread.uri)}:${found.thread.range.start.line + 1}`);
             queueSaveForThread(found.thread);
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent.`)
@@ -2461,6 +2484,7 @@ class ReplyToCommentTool implements vscode.LanguageModelTool<ReplyParams> {
         const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
         found.rec.comments.push(comment);
         found.rec.updatedAt = comment.timestamp;
+        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool, drifted) at ${found.rec.uri}`);
         queueSaveForUri(vscode.Uri.parse(found.rec.uri));
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent. Note: this thread is DRIFTED — its original location was not found, so the reply may no longer be actionable at a specific line.`)
@@ -2485,10 +2509,12 @@ class ResolveCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         if (found.kind === 'live') {
             resolveThread(found.thread);
             refresh();
+            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
             queueSaveForThread(found.thread);
         } else {
             found.rec.status = 'resolved';
             found.rec.updatedAt = new Date().toISOString();
+            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool, drifted) at ${found.rec.uri}`);
             queueSaveForUri(vscode.Uri.parse(found.rec.uri));
         }
         return new vscode.LanguageModelToolResult([
@@ -2514,9 +2540,11 @@ class DeleteCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
             const uri = found.thread.uri;
             found.thread.dispose();
             refresh();
+            outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool at ${vscode.workspace.asRelativePath(uri)}`);
             queueSaveForUri(uri);
         } else {
             driftedMap.delete(commentId);
+            outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool (drifted) at ${found.rec.uri}`);
             queueSaveForUri(vscode.Uri.parse(found.rec.uri));
         }
         return new vscode.LanguageModelToolResult([
