@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { LAUNCHER_FILE, POINTER_FILE, STATE_DIR, Resolution, fromEnv, fromPointerFile, resolveServer } from './mcp-resolve';
 
 // --------------- Types ---------------
 
@@ -472,23 +473,181 @@ function readBody(req: http.IncomingMessage): Promise<string> {
  */
 function deployMcpLauncher(context: vscode.ExtensionContext) {
     try {
-        const stateDir = path.join(os.homedir(), '.diff-review');
-        fs.mkdirSync(stateDir, { recursive: true });
+        fs.mkdirSync(STATE_DIR, { recursive: true });
 
         // Pointer file: lets the launcher skip scanning and use the exact build
         // that is actually running right now.
         const serverPath = path.join(context.extensionPath, 'out', 'mcp-server.js');
-        fs.writeFileSync(path.join(stateDir, 'server-path'), serverPath, 'utf-8');
+        fs.writeFileSync(POINTER_FILE, serverPath, 'utf-8');
 
         const source = path.join(context.extensionPath, 'out', 'mcp-launcher.js');
-        const target = path.join(stateDir, 'mcp-launcher.js');
-        fs.copyFileSync(source, target);
+        fs.copyFileSync(source, LAUNCHER_FILE);
 
-        outputLog.appendLine(`[Diff Review] MCP launcher ready at ${target}`);
+        outputLog.appendLine(`[Diff Review] MCP launcher ready at ${LAUNCHER_FILE}`);
     } catch (err) {
         // Non-fatal: everything except the MCP integration still works.
         outputLog.appendLine(`[Diff Review] Could not deploy MCP launcher: ${err}`);
     }
+}
+
+// --------------- MCP server info ---------------
+
+interface McpInfoRow {
+    label: string;
+    detail: string;
+    /** Text copied when the row is picked; rows without it are informational. */
+    copy?: string;
+    /** Path revealed by the "open folder" button, when the file exists. */
+    reveal?: string;
+}
+
+function homeShort(p: string): string {
+    const home = os.homedir();
+    return p.startsWith(home + path.sep) ? '~' + p.slice(home.length) : p;
+}
+
+function existsNote(p: string): string {
+    return fs.existsSync(p) ? 'exists' : 'MISSING';
+}
+
+const SOURCE_LABEL: Record<Resolution['source'], string> = {
+    env: 'DIFF_REVIEW_SERVER override',
+    pointer: 'pointer file written by this extension',
+    scan: 'scan of installed extensions',
+};
+
+/**
+ * Build the rows for the MCP info picker. Kept separate from the UI so the
+ * interesting part — what a client resolves versus what this window runs — is
+ * plain to read.
+ */
+function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
+    const rows: McpInfoRow[] = [];
+    const ownServer = path.join(context.extensionPath, 'out', 'mcp-server.js');
+
+    let resolved: Resolution | null = null;
+    let resolveError = '';
+    try {
+        resolved = resolveServer();
+    } catch (err: any) {
+        resolveError = err.message;
+    }
+
+    // A client running the launcher may end up on a different build than this
+    // window — a stale pointer file, an env override, or an older copy left in
+    // another extensions root. That mismatch is the whole reason to look here,
+    // so it goes first.
+    if (resolved && resolved.path !== ownServer) {
+        const why = resolved.source === 'env'
+            ? `DIFF_REVIEW_SERVER is set to ${homeShort(resolved.path)}`
+            : resolved.source === 'pointer'
+                ? `the pointer file points at ${homeShort(resolved.path)} — another window may have written it`
+                : `no pointer file matched, so the scan picked ${homeShort(resolved.path)}`;
+        rows.push({
+            label: '$(warning) Clients resolve a different build than this window',
+            detail: why,
+        });
+    } else if (!resolved) {
+        rows.push({ label: '$(error) Cannot resolve a server', detail: resolveError });
+    }
+
+    rows.push({
+        label: '$(rocket) Launcher',
+        detail: `${homeShort(LAUNCHER_FILE)} — ${existsNote(LAUNCHER_FILE)} · point your MCP client here`,
+        copy: LAUNCHER_FILE,
+        reveal: LAUNCHER_FILE,
+    });
+
+    if (resolved) {
+        rows.push({
+            label: '$(server) Resolved server',
+            detail: `${homeShort(resolved.path)} — via ${SOURCE_LABEL[resolved.source]}`
+                + (resolved.version ? ` · v${resolved.version}` : ''),
+            copy: resolved.path,
+            reveal: resolved.path,
+        });
+    }
+
+    rows.push({
+        label: '$(vm) This window’s build',
+        detail: `${homeShort(ownServer)} — v${context.extension.packageJSON.version} · ${existsNote(ownServer)}`,
+        copy: ownServer,
+        reveal: ownServer,
+    });
+
+    const portFile = path.join(os.tmpdir(), 'diff-review-port');
+    rows.push({
+        label: '$(plug) IPC port',
+        detail: ipcPort
+            ? `${ipcPort} — advertised in ${portFile}`
+            : `not listening — ${portFile} may be stale`,
+        copy: ipcPort ? String(ipcPort) : undefined,
+    });
+
+    const envOverride = fromEnv();
+    if (envOverride) {
+        rows.push({
+            label: '$(symbol-variable) DIFF_REVIEW_SERVER',
+            detail: `${homeShort(envOverride)} — ${existsNote(envOverride)}`,
+            copy: envOverride,
+        });
+    }
+
+    const pointer = fromPointerFile();
+    rows.push({
+        label: '$(file-symlink-file) Pointer file',
+        detail: pointer
+            ? `${homeShort(POINTER_FILE)} → ${homeShort(pointer)} — ${existsNote(pointer)}`
+            : `${homeShort(POINTER_FILE)} — MISSING · activate the extension once to write it`,
+        copy: POINTER_FILE,
+        reveal: STATE_DIR,
+    });
+
+    rows.push({
+        label: '$(terminal) Add to Claude Code',
+        detail: `claude mcp add diff-review node ${homeShort(LAUNCHER_FILE)}`,
+        copy: `claude mcp add diff-review node ${LAUNCHER_FILE}`,
+    });
+
+    return rows;
+}
+
+async function showMcpInfo(context: vscode.ExtensionContext) {
+    const revealButton: vscode.QuickInputButton = {
+        iconPath: new vscode.ThemeIcon('folder-opened'),
+        tooltip: 'Reveal in file explorer',
+    };
+
+    const items = collectMcpInfo(context).map(row => ({
+        label: row.label,
+        detail: row.detail,
+        description: row.copy ? 'copy' : '',
+        buttons: row.reveal && fs.existsSync(row.reveal) ? [revealButton] : [],
+        row,
+    }));
+
+    const picker = vscode.window.createQuickPick<typeof items[number]>();
+    picker.title = 'Diff Review — MCP Server Info';
+    picker.placeholder = 'Select a row to copy it to the clipboard';
+    picker.matchOnDetail = true;
+    picker.items = items;
+
+    picker.onDidTriggerItemButton(async event => {
+        const target = event.item.row.reveal;
+        if (target) { await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(target)); }
+    });
+
+    picker.onDidAccept(async () => {
+        const picked = picker.selectedItems[0];
+        if (picked?.row.copy) {
+            await vscode.env.clipboard.writeText(picked.row.copy);
+            vscode.window.showInformationMessage(`Diff Review: copied ${picked.row.copy}`);
+        }
+        picker.hide();
+    });
+
+    picker.onDidHide(() => picker.dispose());
+    picker.show();
 }
 
 // --------------- Activation ---------------
@@ -680,6 +839,11 @@ export function activate(context: vscode.ExtensionContext) {
             refresh();
             saveState();
         })
+    );
+
+    // --- Show MCP server info ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.showMcpInfo', () => showMcpInfo(context))
     );
 
     // --- Show comment panel ---

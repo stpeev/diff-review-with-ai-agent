@@ -14,7 +14,7 @@
     "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
     "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
     "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
-    "build:launcher": "npx esbuild src/mcp-launcher.ts --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
+    "build:launcher": "npx esbuild src/mcp-launcher.ts --bundle --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
     "package": "echo y | npx vsce package --no-dependencies",
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast"
@@ -88,6 +88,11 @@
         "command": "diffReview.unresolve",
         "title": "Reopen",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "diffReview.showMcpInfo",
+        "title": "Diff Review: Show MCP Server Info",
+        "icon": "$(server)"
       },
       {
         "command": "diffReview.showPanel",
