@@ -11,15 +11,15 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
-    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode --main-fields=module,main",
-    "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
-    "build:launcher": "npx esbuild src/mcp-launcher.ts --bundle --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
+    "build": "node esbuild.config.js ext mcp launcher",
+    "build:ext": "node esbuild.config.js ext",
+    "build:mcp": "node esbuild.config.js mcp",
+    "build:launcher": "node esbuild.config.js launcher",
     "package": "echo y | npx vsce package --no-dependencies",
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
     "sandbox": "npm run build && node scripts/sandbox.js",
-    "test": "npx esbuild src/mcp-consumers.ts --bundle --outfile=out/mcp-consumers.js --format=cjs --platform=node --target=node18 --main-fields=module,main && node --test test/*.test.js"
+    "test": "node esbuild.config.js consumers && node --test test/*.test.js"
   },
   "engines": {
     "vscode": "^1.93.0"

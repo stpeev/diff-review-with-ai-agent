@@ -210,6 +210,10 @@ src/
 
 ## Development
 
+Bundle settings live in `esbuild.config.js` — esbuild has no config-file format
+of its own, so that file is a script calling its JS API, and the npm scripts
+just name targets (`ext`, `mcp`, `launcher`, `consumers`).
+
 ```bash
 # Install dependencies
 npm install
@@ -222,6 +226,9 @@ npm run build:ext
 
 # Build MCP server only
 npm run build:mcp
+
+# Run the tests (node:test, no framework to install)
+npm test
 
 # Package vsix
 npm run package
