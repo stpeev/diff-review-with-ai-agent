@@ -1,0 +1,13 @@
+{
+    // `main` points at out/extension.js, which the Extension Development Host
+    // will not build for us — so the launch config runs this first.
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "npm",
+            "script": "build",
+            "group": "build",
+            "problemMatcher": []
+        }
+    ]
+}

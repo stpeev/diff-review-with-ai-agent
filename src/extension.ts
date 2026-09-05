@@ -558,30 +558,10 @@ function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
         reveal: LAUNCHER_FILE,
     });
 
-    if (resolved) {
-        rows.push({
-            label: '$(server) Resolved server',
-            detail: `${homeShort(resolved.path)} — via ${SOURCE_LABEL[resolved.source]}`
-                + (resolved.version ? ` · v${resolved.version}` : ''),
-            copy: resolved.path,
-            reveal: resolved.path,
-        });
-    }
-
     rows.push({
-        label: '$(vm) This window’s build',
-        detail: `${homeShort(ownServer)} — v${context.extension.packageJSON.version} · ${existsNote(ownServer)}`,
-        copy: ownServer,
-        reveal: ownServer,
-    });
-
-    const portFile = path.join(os.tmpdir(), 'diff-review-port');
-    rows.push({
-        label: '$(plug) IPC port',
-        detail: ipcPort
-            ? `${ipcPort} — advertised in ${portFile}`
-            : `not listening — ${portFile} may be stale`,
-        copy: ipcPort ? String(ipcPort) : undefined,
+        label: '$(terminal) Add to Claude Code',
+        detail: `claude mcp add diff-review node ${homeShort(LAUNCHER_FILE)}`,
+        copy: `claude mcp add diff-review node ${LAUNCHER_FILE}`,
     });
 
     const envOverride = fromEnv();
@@ -603,11 +583,36 @@ function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
         reveal: STATE_DIR,
     });
 
-    rows.push({
-        label: '$(terminal) Add to Claude Code',
-        detail: `claude mcp add diff-review node ${homeShort(LAUNCHER_FILE)}`,
-        copy: `claude mcp add diff-review node ${LAUNCHER_FILE}`,
-    });
+    if (resolved) {
+        rows.push({
+            label: '$(server) Resolved server',
+            detail: `${homeShort(resolved.path)} — via ${SOURCE_LABEL[resolved.source]}`
+                + (resolved.version ? ` · v${resolved.version}` : ''),
+            copy: resolved.path,
+            reveal: resolved.path,
+        });
+    }
+
+    // Internals of interest only while hacking on the extension itself. The
+    // rows above stay in both modes: they are what a user needs when their MCP
+    // client is silently running a stale build.
+    if (context.extensionMode === vscode.ExtensionMode.Development) {
+        rows.push({
+            label: '$(vm) This window’s build',
+            detail: `${homeShort(ownServer)} — v${context.extension.packageJSON.version} · ${existsNote(ownServer)}`,
+            copy: ownServer,
+            reveal: ownServer,
+        });
+
+        const portFile = path.join(os.tmpdir(), 'diff-review-port');
+        rows.push({
+            label: '$(plug) IPC port',
+            detail: ipcPort
+                ? `${ipcPort} — advertised in ${portFile}`
+                : `not listening — ${portFile} may be stale`,
+            copy: ipcPort ? String(ipcPort) : undefined,
+        });
+    }
 
     return rows;
 }

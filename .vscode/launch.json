@@ -1,0 +1,43 @@
+{
+    // Two ways to run the extension under a debugger. For the fully isolated
+    // instance — its own extensions dir, so the launcher's directory scan is
+    // testable too — use `npm run sandbox` instead (no debugger).
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Shares your real $HOME, so activation rewrites
+            // ~/.diff-review/server-path to point at this repo's build — handy
+            // for testing the mismatch warning, disruptive if you forget.
+            "name": "Run Extension",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "${workspaceFolder}/examples"
+            ],
+            "outFiles": ["${workspaceFolder}/out/**/*.js"],
+            "preLaunchTask": "npm: build"
+        },
+        {
+            // os.homedir() just reads $HOME, and this env block applies to the
+            // extension host process — where deployMcpLauncher runs. So the
+            // pointer file lands in .sandbox/ and your real one is untouched.
+            // Verify it worked: run "Diff Review: Show MCP Server Info" and
+            // check that the Pointer file row sits under .sandbox.
+            "name": "Run Extension (isolated home)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "--profile-temp",
+                "${workspaceFolder}/examples"
+            ],
+            "env": {
+                "HOME": "${workspaceFolder}/.sandbox",
+                "USERPROFILE": "${workspaceFolder}/.sandbox"
+            },
+            "outFiles": ["${workspaceFolder}/out/**/*.js"],
+            "preLaunchTask": "npm: build"
+        }
+    ]
+}

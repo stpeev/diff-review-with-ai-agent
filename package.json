@@ -17,7 +17,8 @@
     "build:launcher": "npx esbuild src/mcp-launcher.ts --bundle --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
     "package": "echo y | npx vsce package --no-dependencies",
     "deploy": "npm run build && node scripts/local-deploy.js",
-    "deploy:fast": "npm run build && node scripts/local-deploy.js --fast"
+    "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
+    "sandbox": "npm run build && node scripts/sandbox.js"
   },
   "engines": {
     "vscode": "^1.93.0"

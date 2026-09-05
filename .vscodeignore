@@ -10,3 +10,4 @@ gen-icon.js
 .gitignore
 scripts
 TODO.md
+.sandbox
