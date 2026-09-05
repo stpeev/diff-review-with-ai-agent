@@ -545,7 +545,7 @@ function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
                 ? `the pointer file points at ${homeShort(resolved.path)} — another window may have written it`
                 : `no pointer file matched, so the scan picked ${homeShort(resolved.path)}`;
         rows.push({
-            label: '$(warning) Clients resolve a different build than this window',
+            label: '$(warning) Consumers resolve a different build than this window',
             detail: why,
         });
     } else if (!resolved) {
@@ -756,7 +756,7 @@ async function showMcpConsumers() {
 
     const picker = vscode.window.createQuickPick<typeof items[number]>();
     picker.title = 'Diff Review — Register MCP Server';
-    picker.placeholder = 'Select a client to register the diff-review MCP server with';
+    picker.placeholder = 'Select where to register the diff-review MCP server';
     picker.matchOnDetail = true;
     picker.items = items;
 

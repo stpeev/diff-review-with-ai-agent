@@ -9,4 +9,4 @@
 # DONE
 
 - [x] Add a command to print out accurate current MCP server info (`Diff Review: Show MCP Server Info`)
-- [x] Add a command to auto discover and add the MCP server (`Diff Review: Register MCP Server with a Client`)
+- [x] Add a command to auto discover and add the MCP server (`Diff Review: Register MCP Server with a Coding Agent`)

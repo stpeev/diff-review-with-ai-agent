@@ -98,7 +98,7 @@
       },
       {
         "command": "diffReview.registerMcpServer",
-        "title": "Diff Review: Register MCP Server with a Client",
+        "title": "Diff Review: Register MCP Server with a Coding Agent",
         "icon": "$(plug)"
       },
       {

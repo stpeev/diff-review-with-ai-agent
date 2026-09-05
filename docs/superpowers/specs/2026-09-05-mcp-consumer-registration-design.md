@@ -162,7 +162,7 @@ success message.
 
 ## Command: `diffReview.registerMcpServer`
 
-Title: *Diff Review: Register MCP Server with a Client*. Contributed alongside
+Title: *Diff Review: Register MCP Server with a Coding Agent*. Contributed alongside
 `diffReview.showMcpInfo` and registered in `activate()`.
 
 A quick pick in the same style as `showMcpInfo`, each row labelled by status:
