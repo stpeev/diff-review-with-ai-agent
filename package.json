@@ -197,6 +197,13 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "key": "escape",
+        "command": "-workbench.action.hideComment",
+        "when": "commentEditorFocused"
+      }
+    ],
     "languageModelTools": [
       {
         "name": "diffReview_listComments",
