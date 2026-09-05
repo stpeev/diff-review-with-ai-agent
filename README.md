@@ -62,16 +62,34 @@ Click the status bar to open an interactive panel with:
 - **Per-comment actions** — Go to, Send to Copilot, Copy, Resolve, Delete
 
 ### Comment Persistence
-- Comments **survive window reloads** via VS Code workspace state
-- **Branch-scoped** — comments are stored per repository + branch
-- Switch branches → comments swap automatically
-- New branches **inherit** comments from the parent branch, then diverge independently
+- Comments are stored under the extension's own storage directory, in
+  `scopes/<scopeId>/comments.json` — not inside your project, and not tied to
+  VS Code's per-workspace state, so two windows on the same folder share one
+  source of truth instead of silently overwriting each other.
+- **Works the same with or without git.** A git repo with a remote scopes by
+  that remote (so it survives a re-clone); a repo with no remote scopes by its
+  path; a plain folder with no `.git` at all gets its own scope too — only
+  branch-scoping needs git.
+- **Branch-scoped** — comments are stored per repository + branch. Switch
+  branches → comments swap automatically. A new branch **inherits** comments
+  from the parent branch, then diverges independently.
+- A single file opened with no folder behind it can't be scoped to anything
+  stable — comments there live only in memory for that session (the status bar
+  says so) rather than silently landing somewhere unexpected.
 
 ### Line Tracking
 - Comments **follow the code** when lines are added or removed above them
 - CRLF-aware — works correctly on Windows with `\r\n` line endings
+- Comments are anchored to their line's content, not just its number — so a
+  `git checkout`, a `git pull`, or an edit from another editor doesn't
+  silently reattach a comment to unrelated code. When a comment's anchor can't
+  be found (the surrounding code changed too much, or the file was deleted),
+  it becomes **drifted**: it leaves the gutter rather than sit at a stale line,
+  and shows up under **Needs re-attaching** in the comment panel with its
+  original code snippet, so you can re-attach it, keep it as a file-level
+  note, or resolve/delete it.
 
-### 4 Copilot Language Model Tools
+### 5 Copilot Language Model Tools
 Enable in **Agent Mode → Tools** to let Copilot interact with your review comments:
 
 ![Agent Reply](examples/screenshot-agent.png)
@@ -79,6 +97,7 @@ Enable in **Agent Mode → Tools** to let Copilot interact with your review comm
 | Tool | Description |
 |---|---|
 | `#listDiffComments` | List all comments with IDs, file locations, status, and thread text |
+| `#createDiffComment` | Create a new comment thread at a file/line |
 | `#replyToDiffComment` | Reply to a comment as the agent role |
 | `#resolveDiffComment` | Mark a comment as resolved/done |
 | `#deleteDiffComment` | Delete a comment thread |
@@ -92,8 +111,10 @@ Agent: [calls #listDiffComments] → sees 3 open comments
        [calls #resolveDiffComment] → marks each as done
 ```
 
+`#createDiffComment` also enables a reviewer/implementer split across two agents: one posts comments against the diff, the other lists and addresses them — no human needs to seed the threads by hand first.
+
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
-The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
+The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `createDiffComment`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
 
 **The quick way:** run **`Diff Review: Register MCP Server with a Coding Agent`** from the command palette. It lists every MCP consumer it can find on your machine — VS Code and its forks (including per-profile configs), Codex CLI, Claude Code — and shows whether `diff-review` is registered with each:
 
@@ -202,9 +223,9 @@ src/
   mcp-server.ts  — Standalone MCP server for Claude Code (connects to IPC)
 ```
 
-**IPC Server**: The extension starts a local HTTP server on `127.0.0.1` (random port). The MCP server discovers the port via a temp file. All comment reads/writes go through the extension (single source of truth).
+**IPC Server**: Each window starts its own local HTTP server on `127.0.0.1` (random port) and writes a descriptor for it into `<tmpdir>/diff-review/`. With more than one window open, the MCP server pings every descriptor and picks the one whose workspace root actually contains your current directory, rather than trusting whichever window activated most recently. All comment reads/writes go through the extension (single source of truth) — a mutation also carries the workspace root the MCP server resolved, and the extension rejects it (`409`) if that doesn't match its own, rather than silently applying it to the wrong project.
 
-**Branch Scoping**: Comments are stored under `diffReview.state.{repoName}.{branchName}` in VS Code's workspace state. Branch switches are detected via the git extension API.
+**Storage & Branch Scoping**: Comments live in `<extension global storage>/scopes/<scopeId>/comments.json`, with branches as buckets inside that one file — not in VS Code's workspace state, which is per-window and has no way to reconcile two windows writing at once. The scope id is derived from the repo's remote when there is one (so it survives a re-clone), from the repo's path when there is a repo with no remote, or from the folder's path when there is no repo at all. Branch switches are detected via the git extension API, but detecting a repo at all never blocks on it — a plain folder starts persisting immediately from a synchronous filesystem check, and only branch-name resolution waits on `vscode.git`.
 
 ---
 

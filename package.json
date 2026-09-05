@@ -19,7 +19,7 @@
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
     "sandbox": "npm run build && node scripts/sandbox.js",
-    "test": "node esbuild.config.js consumers && node --test test/*.test.js"
+    "test": "node esbuild.config.js consumers ipc-discovery scope-id comment-store path-util && node --test test/*.test.js"
   },
   "engines": {
     "vscode": "^1.93.0"
@@ -197,6 +197,13 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "key": "escape",
+        "command": "-workbench.action.hideComment",
+        "when": "commentEditorFocused"
+      }
+    ],
     "languageModelTools": [
       {
         "name": "diffReview_listComments",
@@ -208,6 +215,40 @@
         "inputSchema": {
           "type": "object",
           "properties": {}
+        }
+      },
+      {
+        "name": "diffReview_createComment",
+        "displayName": "Create Diff Review Comment",
+        "toolReferenceName": "createDiffComment",
+        "icon": "$(comment-add)",
+        "modelDescription": "Create a new inline review comment thread at a file/line, as if typed into the editor gutter. Use this to leave review feedback for another agent (or yourself) to address later.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative file path, e.g. \"src/foo.ts\""
+            },
+            "line": {
+              "type": "number",
+              "description": "1-based line number to attach the comment to"
+            },
+            "endLine": {
+              "type": "number",
+              "description": "1-based end line, for a multi-line range. Defaults to line."
+            },
+            "text": {
+              "type": "string",
+              "description": "The comment text"
+            }
+          },
+          "required": [
+            "path",
+            "line",
+            "text"
+          ]
         }
       },
       {

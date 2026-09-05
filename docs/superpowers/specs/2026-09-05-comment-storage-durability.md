@@ -1,6 +1,6 @@
 # Comment Storage Durability
 
-**Status:** proposed
+**Status:** F1–F5 implemented; F6 and F7 not started
 **Date:** 2026-09-05
 
 ## Problem

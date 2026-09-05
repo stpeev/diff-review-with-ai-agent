@@ -35,6 +35,17 @@ const targets = {
     // Not shipped — the extension bundle already contains this module. Built on
     // its own so the tests can require it outside a VS Code host.
     consumers: { ...shared, entryPoints: ['src/mcp-consumers.ts'], outfile: 'out/mcp-consumers.js', target: 'node18' },
+    // Same reasoning as `consumers`, not a duplicate of `ext`: these pure
+    // modules are already *inside* out/extension.js via extension.ts's own
+    // imports, but that bundle also does `import * as vscode from 'vscode'`
+    // at its top — with `vscode` external, requiring it outside the extension
+    // host throws immediately, before a test could reach any pure function in
+    // it. Building the module alone, with no `external` and no vscode import
+    // in its own graph, is what lets a plain `node --test` require it.
+    'ipc-discovery': { ...shared, entryPoints: ['src/ipc-discovery.ts'], outfile: 'out/ipc-discovery.js', target: 'node18' },
+    'scope-id': { ...shared, entryPoints: ['src/scope-id.ts'], outfile: 'out/scope-id.js', target: 'node18' },
+    'comment-store': { ...shared, entryPoints: ['src/comment-store.ts'], outfile: 'out/comment-store.js', target: 'node18' },
+    'path-util': { ...shared, entryPoints: ['src/path-util.ts'], outfile: 'out/path-util.js', target: 'node18' },
 };
 
 module.exports = { shared, targets };
