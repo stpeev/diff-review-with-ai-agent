@@ -1497,7 +1497,8 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
             // Find relevant diff hunk for this line
             const diffHunk = findRelevantHunk(hunks, line);
 
-            parts.push(`### Line ${line}`);
+            const tid = threadIds.get(thread);
+            parts.push(tid !== undefined ? `### Line ${line} (Thread #${tid})` : `### Line ${line}`);
             if (codeContext) {
                 parts.push('```');
                 parts.push(codeContext);
@@ -1514,11 +1515,13 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     }
 
     parts.push('---');
-    parts.push('Inspect the following review comments. Keep all other code unchanged.');
+    parts.push('Address the review comments above. Keep all other code unchanged.');
     parts.push('');
+    parts.push('Each comment heading carries its thread ID as "(Thread #N)"; use that N as threadId below.');
     parts.push('After making the changes, use the review tools to respond:');
-    parts.push('- Use replyToDiffComment (with commentId and text) to explain what you changed for each comment');
-    parts.push('- Use resolveDiffComment (with commentId) to mark each comment as done');
+    parts.push('- Use replyToDiffComment (with threadId and text) to explain what you changed for each comment');
+    parts.push('- Use resolveDiffComment (with threadId) to mark each comment as done, once the change is made');
+    parts.push('- If you could not address a comment, reply explaining why and leave it unresolved');
     return parts.join('\n');
 }
 
