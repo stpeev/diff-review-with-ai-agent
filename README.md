@@ -89,7 +89,7 @@ Click the status bar to open an interactive panel with:
   original code snippet, so you can re-attach it, keep it as a file-level
   note, or resolve/delete it.
 
-### 4 Copilot Language Model Tools
+### 5 Copilot Language Model Tools
 Enable in **Agent Mode → Tools** to let Copilot interact with your review comments:
 
 ![Agent Reply](examples/screenshot-agent.png)
@@ -97,6 +97,7 @@ Enable in **Agent Mode → Tools** to let Copilot interact with your review comm
 | Tool | Description |
 |---|---|
 | `#listDiffComments` | List all comments with IDs, file locations, status, and thread text |
+| `#createDiffComment` | Create a new comment thread at a file/line |
 | `#replyToDiffComment` | Reply to a comment as the agent role |
 | `#resolveDiffComment` | Mark a comment as resolved/done |
 | `#deleteDiffComment` | Delete a comment thread |
@@ -110,8 +111,10 @@ Agent: [calls #listDiffComments] → sees 3 open comments
        [calls #resolveDiffComment] → marks each as done
 ```
 
+`#createDiffComment` also enables a reviewer/implementer split across two agents: one posts comments against the diff, the other lists and addresses them — no human needs to seed the threads by hand first.
+
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
-The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
+The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `createDiffComment`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
 
 **The quick way:** run **`Diff Review: Register MCP Server with a Coding Agent`** from the command palette. It lists every MCP consumer it can find on your machine — VS Code and its forks (including per-profile configs), Codex CLI, Claude Code — and shows whether `diff-review` is registered with each:
 

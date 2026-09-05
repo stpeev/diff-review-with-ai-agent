@@ -6,7 +6,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { LAUNCHER_FILE, POINTER_FILE, STATE_DIR, Resolution, fromEnv, fromPointerFile, resolveServer } from './mcp-resolve';
 import { McpConsumerTarget, discoverConsumers, register, renderSnippet, snippetDestination } from './mcp-consumers';
-import { isAncestor } from './path-util';
+import { isAncestor, resolveWithinRoot } from './path-util';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
 import {
@@ -993,6 +993,16 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         res.writeHead(200);
                         res.end(JSON.stringify({ ok: true, commentId: comment.id, note: 'This thread is drifted — its original location was not found.' }));
                     }
+                } else if (method === 'POST' && url.pathname === '/create') {
+                    const body = await readBody(req);
+                    const { path: relPath, line, endLine, text, expectWorkspaceRoot } = JSON.parse(body);
+                    if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
+                    const resolved = resolveCommentTargetPath(relPath, expectWorkspaceRoot);
+                    if (typeof resolved !== 'string') { res.writeHead(400); res.end(JSON.stringify({ error: resolved.error })); return; }
+                    const result = createCommentThreadAt(vscode.Uri.file(resolved), line - 1, (endLine ?? line) - 1, text);
+                    if ('error' in result) { res.writeHead(400); res.end(JSON.stringify({ error: result.error })); return; }
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ ok: true, threadId: result.threadId }));
                 } else if (method === 'POST' && url.pathname === '/resolve') {
                     const body = await readBody(req);
                     const { threadId, expectWorkspaceRoot } = JSON.parse(body);
@@ -1684,6 +1694,54 @@ function computeAnchorForNewThread(thread: vscode.CommentThread): { anchorHash: 
     } catch {
         return undefined;
     }
+}
+
+/**
+ * Turn a caller-supplied workspace-relative path into an absolute one,
+ * confined to `preferredRoot` when given (the routed IPC caller's matched
+ * workspace root) or searched across every open folder otherwise (the LM
+ * tool, which runs in-process and has no per-caller root of its own).
+ */
+function resolveCommentTargetPath(relPath: string, preferredRoot?: string): string | { error: string } {
+    const roots = preferredRoot ? [preferredRoot] : myWorkspaceRoots;
+    if (roots.length === 0) return { error: 'No workspace folder is open.' };
+    for (const root of roots) {
+        const resolved = resolveWithinRoot(root, relPath);
+        if (resolved && fs.existsSync(resolved)) return resolved;
+    }
+    if (roots.some(root => !resolveWithinRoot(root, relPath))) {
+        return { error: `Path "${relPath}" escapes the workspace root.` };
+    }
+    return { error: `File not found: ${relPath}` };
+}
+
+/**
+ * Create a new inline review comment thread at an arbitrary file/line,
+ * mirroring what `diffReview.createNote` does for a comment typed into the
+ * gutter by hand. Shared by the `/create` IPC endpoint and the
+ * `diffReview_createComment` LM tool so the validation/creation logic isn't
+ * duplicated between the two in-process callers.
+ */
+function createCommentThreadAt(uri: vscode.Uri, startLine0: number, endLine0: number, text: string): { threadId: number } | { error: string } {
+    if (uri.scheme !== 'file' || !fs.existsSync(uri.fsPath)) return { error: `File not found: ${uri.fsPath}` };
+    const lineCount = fs.readFileSync(uri.fsPath, 'utf-8').split(/\r\n|\n/).length;
+    if (startLine0 < 0 || endLine0 < startLine0 || endLine0 >= lineCount) {
+        return { error: `Line out of range for ${vscode.workspace.asRelativePath(uri)} (file has ${lineCount} line(s)).` };
+    }
+
+    const range = new vscode.Range(startLine0, 0, endLine0, 0);
+    const comment = new ReviewComment(text, 'agent');
+    const thread = activeController!.createCommentThread(uri, range, [comment]);
+    thread.canReply = true;
+    thread.label = 'Open';
+    thread.contextValue = 'open';
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    const anchor = computeAnchorForNewThread(thread);
+    const tid = trackThread(thread, undefined, anchor);
+    outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(uri)}:${startLine0 + 1}`);
+    refresh();
+    queueSaveForThread(thread);
+    return { threadId: tid };
 }
 
 // --------------- Register with an MCP consumer ---------------
@@ -2416,10 +2474,34 @@ function registerTools(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.lm.registerTool('diffReview_listComments', new ListCommentsTool()),
+        vscode.lm.registerTool('diffReview_createComment', new CreateCommentTool()),
         vscode.lm.registerTool('diffReview_replyToComment', new ReplyToCommentTool()),
         vscode.lm.registerTool('diffReview_resolveComment', new ResolveCommentTool()),
         vscode.lm.registerTool('diffReview_deleteComment', new DeleteCommentTool()),
     );
+}
+
+interface CreateCommentParams { path: string; line: number; endLine?: number; text: string; }
+
+class CreateCommentTool implements vscode.LanguageModelTool<CreateCommentParams> {
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<CreateCommentParams>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        const { path: relPath, line, endLine, text } = options.input;
+        const resolved = resolveCommentTargetPath(relPath);
+        if (typeof resolved !== 'string') {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(resolved.error)]);
+        }
+        const result = createCommentThreadAt(vscode.Uri.file(resolved), line - 1, (endLine ?? line) - 1, text);
+        if ('error' in result) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(result.error)]);
+        }
+        outputLog.appendLine(`[Diff Review] Comment #${result.threadId} created via LM tool at ${relPath}:${line}`);
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`Created comment thread #${result.threadId} at ${relPath}:${line}.`)
+        ]);
+    }
 }
 
 class ListCommentsTool implements vscode.LanguageModelTool<{}> {

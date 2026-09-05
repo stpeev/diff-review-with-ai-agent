@@ -45,6 +45,7 @@ const targets = {
     'ipc-discovery': { ...shared, entryPoints: ['src/ipc-discovery.ts'], outfile: 'out/ipc-discovery.js', target: 'node18' },
     'scope-id': { ...shared, entryPoints: ['src/scope-id.ts'], outfile: 'out/scope-id.js', target: 'node18' },
     'comment-store': { ...shared, entryPoints: ['src/comment-store.ts'], outfile: 'out/comment-store.js', target: 'node18' },
+    'path-util': { ...shared, entryPoints: ['src/path-util.ts'], outfile: 'out/path-util.js', target: 'node18' },
 };
 
 module.exports = { shared, targets };

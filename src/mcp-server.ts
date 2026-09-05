@@ -211,7 +211,27 @@ server.tool(
     }
 );
 
-// Tool 2: Reply to comment
+// Tool 2: Create comment
+server.tool(
+    'createDiffComment',
+    'Create a new inline review comment thread at a file/line, as if typed into the editor gutter. Use this to leave review feedback for another agent (or yourself) to address later.',
+    {
+        path: z.string().describe('Workspace-relative file path, e.g. "src/foo.ts"'),
+        line: z.number().describe('1-based line number to attach the comment to'),
+        endLine: z.number().optional().describe('1-based end line, for a multi-line range. Defaults to `line`.'),
+        text: z.string().describe('The comment text'),
+    },
+    async ({ path: filePath, line, endLine, text }) => {
+        try {
+            const result = await ipcPost('/create', { path: filePath, line, endLine, text });
+            return { content: [{ type: 'text' as const, text: `Created comment thread #${result.threadId} at ${filePath}:${line}.` }] };
+        } catch (e: any) {
+            return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }] };
+        }
+    }
+);
+
+// Tool 3: Reply to comment
 server.tool(
     'replyToDiffComment',
     'Reply to an existing inline review comment thread as the agent role',
@@ -229,7 +249,7 @@ server.tool(
     }
 );
 
-// Tool 3: Resolve comment
+// Tool 4: Resolve comment
 server.tool(
     'resolveDiffComment',
     'Mark an inline review comment as resolved/done',
@@ -246,7 +266,7 @@ server.tool(
     }
 );
 
-// Tool 4: Delete comment
+// Tool 5: Delete comment
 server.tool(
     'deleteDiffComment',
     'Delete an inline review comment thread entirely',

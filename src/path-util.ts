@@ -16,6 +16,17 @@ export function isAncestor(root: string, target: string): boolean {
 }
 
 /**
+ * Resolve `relPath` against `root`, rejecting anything that would land
+ * outside it — a relative `../` escape or an absolute path elsewhere. Used to
+ * turn an agent-supplied workspace-relative path into an absolute one without
+ * trusting it to stay inside the workspace.
+ */
+export function resolveWithinRoot(root: string, relPath: string): string | undefined {
+    const resolved = path.resolve(root, relPath);
+    return isAncestor(root, resolved) ? resolved : undefined;
+}
+
+/**
  * Among `items`, the one whose root (via `getRoot`) is the deepest ancestor of
  * `target` — i.e. the longest matching root wins, so a nested repo resolves to
  * itself rather than to an enclosing folder.
