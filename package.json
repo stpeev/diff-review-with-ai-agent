@@ -9,6 +9,16 @@
     "type": "git",
     "url": "https://github.com/jinqishen0725/diff-review"
   },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
+    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
+    "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
+    "build:launcher": "npx esbuild src/mcp-launcher.ts --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
+    "package": "echo y | npx vsce package --no-dependencies",
+    "deploy": "npm run build && node scripts/local-deploy.js",
+    "deploy:fast": "npm run build && node scripts/local-deploy.js --fast"
+  },
   "engines": {
     "vscode": "^1.93.0"
   },
@@ -254,14 +264,6 @@
         }
       }
     ]
-  },
-  "scripts": {
-    "compile": "tsc -p ./",
-    "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
-    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
-    "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
-    "build:launcher": "npx esbuild src/mcp-launcher.ts --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
-    "package": "echo y | npx vsce package --no-dependencies"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

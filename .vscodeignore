@@ -8,3 +8,5 @@ gen-icon.js
 **/*.map
 **/*.ts
 .gitignore
+scripts
+TODO.md

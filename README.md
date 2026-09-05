@@ -212,11 +212,21 @@ npm run build:ext
 npm run build:mcp
 
 # Package vsix
-npx @vscode/vsce package --no-dependencies --allow-missing-repository
+npm run package
 
-# Deploy to installed extension (dev shortcut)
-Copy-Item "out\extension.js" "$HOME\.vscode\extensions\jinqishen.diff-review-0.1.0\out\extension.js" -Force
+# Deploy: package a vsix and install it via the `code` CLI (use after a version bump)
+npm run deploy
+
+# Deploy fast: copy the fresh build over the already-installed extension of the
+# same version, skipping packaging (use while iterating on code)
+npm run deploy:fast
 ```
+
+Both deploy scripts build first. Reload the VS Code window afterwards
+(**Developer: Reload Window**) to pick up the new build; on activation the
+extension refreshes `~/.diff-review/mcp-launcher.js` and `server-path`, so MCP
+clients keep resolving the current server without reconfiguration — restart the
+MCP client too if you changed the server itself.
 
 ---
 
