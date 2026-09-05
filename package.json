@@ -257,9 +257,10 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "build": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode && npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
+    "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
     "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
     "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
+    "build:launcher": "npx esbuild src/mcp-launcher.ts --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
     "package": "echo y | npx vsce package --no-dependencies"
   },
   "dependencies": {

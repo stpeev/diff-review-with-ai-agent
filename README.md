@@ -95,13 +95,22 @@ Agent: [calls #listDiffComments] → sees 3 open comments
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
 The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
 
+Open the extension in VS Code once after installing. On activation it deploys a small launcher to a **stable, version-independent path** — point your MCP client at that, and the config keeps working across extension upgrades:
+
+```
+~/.diff-review/mcp-launcher.js          # macOS / Linux
+%USERPROFILE%\.diff-review\mcp-launcher.js   # Windows
+```
+
+> Do **not** configure the extension's own `out/mcp-server.js` directly. VS Code puts the version in the install directory name (`jinqishen.diff-review-0.3.0`), so that path breaks on every upgrade. The launcher resolves the current build at runtime instead.
+
 **Claude Code:**
 ```bash
 # Windows:
-claude mcp add diff-review node "%USERPROFILE%\.vscode\extensions\jinqishen.diff-review-<version>\out\mcp-server.js"
+claude mcp add diff-review node "%USERPROFILE%\.diff-review\mcp-launcher.js"
 
 # macOS/Linux:
-claude mcp add diff-review node ~/.vscode/extensions/jinqishen.diff-review-<version>/out/mcp-server.js
+claude mcp add diff-review node ~/.diff-review/mcp-launcher.js
 ```
 
 **Cursor:**
@@ -111,18 +120,44 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
   "mcpServers": {
     "diff-review": {
       "command": "node",
-      "args": ["<extension-path>/out/mcp-server.js"]
+      "args": ["/full/path/to/home/.diff-review/mcp-launcher.js"]
     }
   }
 }
 ```
 
+> ⚠️ Use an **absolute path** in JSON configs. Clients spawn the server directly rather than through a shell, so `~` is never expanded — Node treats it as an ordinary folder name and resolves it against the client's working directory, giving a confusing error about a path you never wrote:
+>
+> ```
+> Error: Cannot find module '/some/other/dir/~/.diff-review/mcp-launcher.js'
+> ```
+>
+> The `claude mcp add` command above is safe only because your *shell* expands `~` before Claude Code ever sees it.
+
 **Other MCP clients:**
-Any client that supports the stdio transport can connect. The server binary is at:
+Any client supporting the stdio transport can connect. Configure it as command `node` with the launcher's absolute path as the only argument — no flags, no environment needed. The launcher is also directly executable (`/Users/you/.diff-review/mcp-launcher.js`) if your client prefers a single command string.
+
+To check it by hand:
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | node ~/.diff-review/mcp-launcher.js
 ```
-<extension-install-path>/out/mcp-server.js
+It should print a JSON list of the four tools. The launcher speaks JSON-RPC on stdin/stdout, so run on its own it will just sit and wait for input — that is correct behaviour, not a hang.
+
+**Working on the extension itself?** Set `DIFF_REVIEW_SERVER` to override resolution and load your local build:
+```bash
+DIFF_REVIEW_SERVER=/path/to/diff-review/out/mcp-server.js node ~/.diff-review/mcp-launcher.js
 ```
-Run with: `node mcp-server.js` (stdio transport, no arguments needed).
+
+<details>
+<summary>How the launcher resolves the server</summary>
+
+In order of preference:
+1. `DIFF_REVIEW_SERVER` — explicit override; errors out if the file is missing rather than silently falling back.
+2. `~/.diff-review/server-path` — written by the extension on each activation, so it names the exact build currently running.
+3. A scan of the known extension directories (VS Code, Insiders, OSS, remote server, Cursor, Windsurf), picking the highest installed version.
+
+</details>
 
 > **Note:** The VS Code extension must be running (window open and activated) for the MCP server to connect. The MCP server communicates with the extension via a local IPC server — comments are always live, no stale files.
 

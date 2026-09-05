@@ -462,6 +462,35 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     });
 }
 
+// --------------- MCP launcher deployment ---------------
+
+/**
+ * VS Code installs us into a versioned directory, so any MCP config pointing
+ * straight at our `out/mcp-server.js` breaks on the next upgrade. Instead we
+ * keep a stable launcher in ~/.diff-review and refresh it on every activation:
+ * clients configure that path once and it keeps resolving to the current build.
+ */
+function deployMcpLauncher(context: vscode.ExtensionContext) {
+    try {
+        const stateDir = path.join(os.homedir(), '.diff-review');
+        fs.mkdirSync(stateDir, { recursive: true });
+
+        // Pointer file: lets the launcher skip scanning and use the exact build
+        // that is actually running right now.
+        const serverPath = path.join(context.extensionPath, 'out', 'mcp-server.js');
+        fs.writeFileSync(path.join(stateDir, 'server-path'), serverPath, 'utf-8');
+
+        const source = path.join(context.extensionPath, 'out', 'mcp-launcher.js');
+        const target = path.join(stateDir, 'mcp-launcher.js');
+        fs.copyFileSync(source, target);
+
+        outputLog.appendLine(`[Diff Review] MCP launcher ready at ${target}`);
+    } catch (err) {
+        // Non-fatal: everything except the MCP integration still works.
+        outputLog.appendLine(`[Diff Review] Could not deploy MCP launcher: ${err}`);
+    }
+}
+
 // --------------- Activation ---------------
 
 export function activate(context: vscode.ExtensionContext) {
@@ -518,6 +547,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- Branch watcher ---
     setupBranchWatcher(context, controller);
+
+    // --- MCP launcher ---
+    deployMcpLauncher(context);
 
     // --- IPC Server ---
     startIpcServer(context).then(port => {
@@ -1110,8 +1142,8 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
 
     const parts: string[] = [];
     parts.push(
-        'Apply the following review comments to the code. Each comment includes ' +
-        'the file, line number, surrounding code context, the git diff (if available), and the requested change.\n'
+        'Inspect the following review comments to the code. Each comment includes ' +
+        'the file, line number, surrounding code context, the git diff (if available), and the comment text itself.\n'
     );
 
     for (const [uriStr, fileThreads] of byFile) {
@@ -1184,7 +1216,7 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     }
 
     parts.push('---');
-    parts.push('Apply every change above. Keep all other code unchanged.');
+    parts.push('Inspect the following review comments. Keep all other code unchanged.');
     parts.push('');
     parts.push('After making the changes, use the review tools to respond:');
     parts.push('- Use replyToDiffComment (with commentId and text) to explain what you changed for each comment');
