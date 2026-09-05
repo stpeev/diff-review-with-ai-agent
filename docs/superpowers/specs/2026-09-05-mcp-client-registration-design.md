@@ -1,13 +1,13 @@
 # MCP Client Discovery and Registration
 
-**Status:** approved design, not yet implemented
+**Status:** implemented
 **Date:** 2026-09-05
 
 ## Problem
 
 The extension ships an MCP server and a stable launcher at
-`~/.diff-review/mcp-launcher.js`, but every client has to be wired up by hand.
-The README walks through it per client, which has two failure modes:
+`~/.diff-review/mcp-launcher.js`, but every consumer has to be wired up by hand.
+The README walks through it per consumer, which has two failure modes:
 
 1. People never do it, so the MCP tools appear broken.
 2. People wire it up against the versioned install path
@@ -17,7 +17,7 @@ The README walks through it per client, which has two failure modes:
 
 ## Goal
 
-One command that lists every MCP client on the machine, says whether
+One command that lists every MCP consumer on the machine, says whether
 `diff-review` is registered with each and whether that registration is correct,
 and registers or repairs it on selection — with a copyable command as the
 always-available fallback.
@@ -50,19 +50,19 @@ not expanded by anything and is a documented footgun (README, "Cannot find
 module"). Paths in copied **shell commands** keep `~`, because the shell expands
 it before the client sees it.
 
-## Module: `src/mcp-clients.ts`
+## Module: `src/mcp-consumers.ts`
 
 New file, pure, no `vscode` import — same shape as `mcp-resolve.ts`, so it stays
 unit-testable once a framework lands and could be reused by the launcher.
 
 ```ts
-type ClientKind = 'vscode-json' | 'codex-toml' | 'claude-json';
+type ConsumerKind = 'vscode-json' | 'codex-toml' | 'claude-json';
 type Status = 'current' | 'stale' | 'missing';
 
-interface McpClientTarget {
+interface McpConsumerTarget {
     id: string;          // 'vscode', 'vscode:profile:Work', 'cursor', 'codex', 'claude'
     label: string;       // 'VS Code', 'VS Code — profile "Work"', 'Codex CLI'
-    kind: ClientKind;
+    kind: ConsumerKind;
     configPath: string;
     status: Status;
     /** For stale rows: the command line currently registered. */
@@ -76,7 +76,7 @@ interface McpClientTarget {
 
 Exported surface:
 
-- `discoverClients(): McpClientTarget[]`
+- `discoverConsumers(): McpConsumerTarget[]`
 - `renderSnippet(target): string` — the JSON block or shell command to copy
 - `register(target): void` — throws with a user-facing message on failure
 
@@ -98,10 +98,20 @@ Apps: `Code`, `Code - Insiders`, `VSCodium`, `Cursor`, `Windsurf`. The config is
 Cursor gets exactly one row. Its config is `~/.cursor/mcp.json` when that file
 exists — the location Cursor documents — otherwise its user-data `mcp.json`.
 
-**VS Code profiles.** `<root>/profiles/*/mcp.json`, one row each. Display names
-come from `<root>/globalStorage/storage.json` → `userDataProfiles[]`
-(`{ location, name }`), matched on `location` against the directory name; fall
-back to the directory id when the lookup fails.
+**VS Code profiles.** Driven by `<root>/globalStorage/storage.json` →
+`userDataProfiles[]` (`{ location, name, useDefaultFlags }`), one row per
+profile, config at `<root>/profiles/<location>/mcp.json`.
+
+> **Corrected during implementation.** The spec originally said to scan
+> `profiles/*/mcp.json` and use `storage.json` only for display names. Testing
+> against a real machine showed that wrong three ways: directories under
+> `profiles/` outlive the profiles that created them (an orphan `342d1528` dir
+> was listed with no matching profile), a `location` can be *nested*
+> (`builtin/agents`), so `basename` mislabels it, and a profile with
+> `useDefaultFlags.mcp === true` reads the **default** profile's `mcp.json` —
+> writing to its own path would produce a file VS Code silently ignores.
+> `storage.json` is therefore authoritative, and profiles that inherit MCP
+> config are not listed. Covered by the `profiles:` tests.
 
 **Codex CLI.** `~/.codex/config.toml`, honouring `$CODEX_HOME` when set.
 
@@ -198,9 +208,11 @@ first activation; in that case the command reports that and points at
 
 ## Verification
 
-The repo has no test framework yet (tracked in `TODO.md`). Until it does:
+The repo had no test framework. Rather than add a dependency, `npm test` bundles
+the module with esbuild and runs Node's built-in `node:test` over `test/` — 22
+tests, no new devDependency. Beyond those:
 
-1. Run `discoverClients()` read-only against the real machine and eyeball the
+1. Run `discoverConsumers()` read-only against the real machine and eyeball the
    list against the known state — VS Code registered, Codex stale, Cursor and
    Claude Code missing.
 2. Exercise each writer against temp-directory **copies of the real configs**,
@@ -210,15 +222,19 @@ The repo has no test framework yet (tracked in `TODO.md`). Until it does:
 3. Manual pass through the command in the sandbox (`npm run sandbox`) for each
    of the three outcomes: already-current, stale repair, copy-only.
 
-Because `mcp-clients.ts` is pure, all of step 1 and 2 becomes real unit tests the
-moment a framework lands.
+Results: Codex repaired with exactly one line changed (the `args` line) and all
+32 tables intact; VS Code went 4 → 5 servers with every existing one preserved;
+`~/.claude.json` lost none of its 1927 lines of unrelated state. No backup file
+was ever written next to a real config, confirming the originals were never
+opened for write.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `src/mcp-clients.ts` | new — discovery, status, snippets, writers |
+| `src/mcp-consumers.ts` | new — discovery, status, snippets, writers |
+| `test/mcp-consumers.test.js` | new — 22 tests over the pure transforms |
 | `src/extension.ts` | register `diffReview.registerMcpServer`, quick pick UI |
-| `package.json` | contribute the command; add `jsonc-parser` dependency |
+| `package.json` | contribute the command; add `jsonc-parser`; add `test` script |
 | `README.md` | point the MCP setup section at the command |
 | `TODO.md` | move "auto discover and add the MCP server" to DONE |

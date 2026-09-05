@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { LAUNCHER_FILE, POINTER_FILE, STATE_DIR, Resolution, fromEnv, fromPointerFile, resolveServer } from './mcp-resolve';
+import { McpConsumerTarget, discoverConsumers, register, renderSnippet, snippetDestination } from './mcp-consumers';
 
 // --------------- Types ---------------
 
@@ -553,7 +554,7 @@ function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
 
     rows.push({
         label: '$(rocket) Launcher',
-        detail: `${homeShort(LAUNCHER_FILE)} — ${existsNote(LAUNCHER_FILE)} · point your MCP client here`,
+        detail: `${homeShort(LAUNCHER_FILE)} — ${existsNote(LAUNCHER_FILE)} · point your MCP consumer here`,
         copy: LAUNCHER_FILE,
         reveal: LAUNCHER_FILE,
     });
@@ -649,6 +650,129 @@ async function showMcpInfo(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(`Diff Review: copied ${picked.row.copy}`);
         }
         picker.hide();
+    });
+
+    picker.onDidHide(() => picker.dispose());
+    picker.show();
+}
+
+
+// --------------- Register with an MCP consumer ---------------
+
+const STATUS_ICON: Record<McpConsumerTarget['status'], string> = {
+    current: '$(check)',
+    stale: '$(warning)',
+    missing: '$(circle-outline)',
+};
+
+function statusNote(target: McpConsumerTarget): string {
+    if (!target.writable) return `not registered (manual) — ${target.reason}`;
+    switch (target.status) {
+        case 'current': return 'registered';
+        case 'stale': return `registered — runs ${target.current}`;
+        case 'missing': return 'not registered';
+    }
+}
+
+async function copySnippet(target: McpConsumerTarget) {
+    const snippet = renderSnippet(target);
+    await vscode.env.clipboard.writeText(snippet);
+    vscode.window.showInformationMessage(
+        `Diff Review: copied the ${target.label} config — ${snippetDestination(target)}.`);
+}
+
+/**
+ * Confirm, then write. Every failure path ends at the clipboard rather than a
+ * dead end, so a config we cannot edit is still a config the user can fix.
+ */
+async function registerWithConsumer(target: McpConsumerTarget) {
+    if (target.status === 'current') {
+        vscode.window.showInformationMessage(
+            `Diff Review: ${target.label} is already registered against the launcher.`);
+        return;
+    }
+
+    if (!target.writable) {
+        await copySnippet(target);
+        return;
+    }
+
+    const before = target.status === 'stale' ? `Currently runs:\n  ${target.current}\n\n` : '';
+    const answer = await vscode.window.showInformationMessage(
+        `${target.status === 'stale' ? 'Repair' : 'Register'} diff-review in ${target.label}?`,
+        {
+            modal: true,
+            detail: `${target.configPath}\n\n${before}Will run:\n  node ${LAUNCHER_FILE}`,
+        },
+        'Write', 'Copy',
+    );
+
+    if (answer === 'Copy') { await copySnippet(target); return; }
+    if (answer !== 'Write') return;
+
+    try {
+        const { backup } = register(target);
+        vscode.window.showInformationMessage(
+            `Diff Review: registered with ${target.label}.` +
+            (backup ? ` Previous config saved to ${homeShort(backup)}.` : ''));
+    } catch (err: any) {
+        outputLog.appendLine(`[Diff Review] register failed for ${target.id}: ${err.message}`);
+        await copySnippet(target);
+        vscode.window.showWarningMessage(
+            `Diff Review: could not write ${homeShort(target.configPath)} (${err.message}). ` +
+            'The config is on your clipboard instead.');
+    }
+}
+
+async function showMcpConsumers() {
+    const revealButton: vscode.QuickInputButton = {
+        iconPath: new vscode.ThemeIcon('folder-opened'),
+        tooltip: 'Reveal in file explorer',
+    };
+    const copyButton: vscode.QuickInputButton = {
+        iconPath: new vscode.ThemeIcon('clippy'),
+        tooltip: 'Copy the config instead of writing it',
+    };
+
+    if (!fs.existsSync(LAUNCHER_FILE)) {
+        vscode.window.showWarningMessage(
+            'Diff Review: the MCP launcher is not deployed yet. Run "Diff Review: Show MCP Server Info" to check.');
+        return;
+    }
+
+    const targets = discoverConsumers();
+    if (targets.length === 0) {
+        vscode.window.showInformationMessage('Diff Review: no MCP consumers found on this machine.');
+        return;
+    }
+
+    const items = targets.map(target => ({
+        label: `${STATUS_ICON[target.status]} ${target.label}`,
+        description: statusNote(target),
+        detail: homeShort(target.configPath),
+        buttons: fs.existsSync(target.configPath) ? [copyButton, revealButton] : [copyButton],
+        target,
+    }));
+
+    const picker = vscode.window.createQuickPick<typeof items[number]>();
+    picker.title = 'Diff Review — Register MCP Server';
+    picker.placeholder = 'Select a client to register the diff-review MCP server with';
+    picker.matchOnDetail = true;
+    picker.items = items;
+
+    picker.onDidTriggerItemButton(async event => {
+        if (event.button === copyButton) {
+            picker.hide();
+            await copySnippet(event.item.target);
+            return;
+        }
+        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(event.item.target.configPath));
+    });
+
+    picker.onDidAccept(async () => {
+        const picked = picker.selectedItems[0];
+        picker.hide();
+        if (picked) { await registerWithConsumer(picked.target); }
     });
 
     picker.onDidHide(() => picker.dispose());
@@ -849,6 +973,11 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Show MCP server info ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.showMcpInfo', () => showMcpInfo(context))
+    );
+
+    // --- Register the MCP server with a discovered client ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.registerMcpServer', () => showMcpConsumers())
     );
 
     // --- Show comment panel ---

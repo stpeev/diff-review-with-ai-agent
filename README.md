@@ -95,6 +95,18 @@ Agent: [calls #listDiffComments] → sees 3 open comments
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
 The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
 
+**The quick way:** run **`Diff Review: Register MCP Server with a Client`** from the command palette. It lists every MCP consumer it can find on your machine — VS Code and its forks (including per-profile configs), Codex CLI, Claude Code — and shows whether `diff-review` is registered with each:
+
+| | meaning |
+|---|---|
+| `$(check)` registered | already points at the launcher, nothing to do |
+| `$(warning)` registered — runs … | registered, but against a path that breaks on upgrade; pick it to repair |
+| `$(circle-outline)` not registered | pick it to add |
+
+Picking a consumer shows exactly what will be written and where, and backs the file up before changing it. Every row also offers **Copy** instead, if you would rather paste the config or run the `mcp add` command yourself — and rows we cannot edit safely are copy-only automatically.
+
+The rest of this section is the manual equivalent.
+
 Open the extension in VS Code once after installing. On activation it deploys a small launcher to a **stable, version-independent path** — point your MCP client at that, and the config keeps working across extension upgrades:
 
 ```

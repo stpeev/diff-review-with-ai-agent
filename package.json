@@ -12,13 +12,14 @@
   "scripts": {
     "compile": "tsc -p ./",
     "build": "npm run build:ext && npm run build:mcp && npm run build:launcher",
-    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode",
+    "build:ext": "npx esbuild src/extension.ts --bundle --outfile=out/extension.js --format=cjs --platform=node --external:vscode --main-fields=module,main",
     "build:mcp": "npx esbuild src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node --target=node18",
     "build:launcher": "npx esbuild src/mcp-launcher.ts --bundle --outfile=out/mcp-launcher.js --format=cjs --platform=node --target=node18",
     "package": "echo y | npx vsce package --no-dependencies",
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
-    "sandbox": "npm run build && node scripts/sandbox.js"
+    "sandbox": "npm run build && node scripts/sandbox.js",
+    "test": "npx esbuild src/mcp-consumers.ts --bundle --outfile=out/mcp-consumers.js --format=cjs --platform=node --target=node18 --main-fields=module,main && node --test test/*.test.js"
   },
   "engines": {
     "vscode": "^1.93.0"
@@ -94,6 +95,11 @@
         "command": "diffReview.showMcpInfo",
         "title": "Diff Review: Show MCP Server Info",
         "icon": "$(server)"
+      },
+      {
+        "command": "diffReview.registerMcpServer",
+        "title": "Diff Review: Register MCP Server with a Client",
+        "icon": "$(plug)"
       },
       {
         "command": "diffReview.showPanel",
@@ -273,6 +279,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "jsonc-parser": "^3.3.1",
     "zod": "^3.24.4"
   },
   "devDependencies": {
