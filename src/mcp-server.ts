@@ -5,7 +5,9 @@
  * and delete inline review comments.
  *
  * Usage: node mcp-server.js
- * The port is discovered via ~/tmp/diff-review-port or --port flag.
+ * The port is discovered by pinging every window descriptor in
+ * `<tmpdir>/diff-review/` and picking the one whose workspace root matches the
+ * caller's cwd (see ipc-discovery.ts) — or via --port to skip discovery.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -15,25 +17,113 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as http from 'http';
+import {
+    Descriptor, descriptorDir, resolvePort, ResolveResult,
+    NoServerError, AmbiguousPortError,
+} from './ipc-discovery';
+
+// ---------- IPC target resolution ----------
+
+function portFlag(): number | undefined {
+    const idx = process.argv.indexOf('--port');
+    if (idx !== -1 && process.argv[idx + 1]) return parseInt(process.argv[idx + 1], 10);
+    return undefined;
+}
+
+function readAllDescriptors(tmpDir: string): Descriptor[] {
+    let entries: string[];
+    try {
+        entries = fs.readdirSync(descriptorDir(tmpDir));
+    } catch {
+        return [];
+    }
+    const out: Descriptor[] = [];
+    for (const entry of entries) {
+        if (!entry.endsWith('.json')) continue;
+        try {
+            const d = JSON.parse(fs.readFileSync(path.join(descriptorDir(tmpDir), entry), 'utf-8'));
+            if (typeof d.port === 'number') out.push(d);
+        } catch {
+            // Ignore unreadable/partial files — the owning window sweeps these.
+        }
+    }
+    return out;
+}
+
+function pingDescriptor(port: number, timeoutMs = 800): Promise<boolean> {
+    return new Promise(resolve => {
+        const req = http.get(`http://127.0.0.1:${port}/ping`, res => { res.resume(); resolve(res.statusCode === 200); });
+        req.on('error', () => resolve(false));
+        req.setTimeout(timeoutMs, () => { req.destroy(); resolve(false); });
+    });
+}
+
+const LEGACY_PORT_FILE = path.join(os.tmpdir(), 'diff-review-port');
+
+function legacyPort(): number | null {
+    try {
+        return parseInt(fs.readFileSync(LEGACY_PORT_FILE, 'utf-8').trim(), 10);
+    } catch {
+        return null;
+    }
+}
+
+let cachedTarget: ResolveResult | null = null;
+
+/**
+ * Resolve which window's IPC server to talk to, once per process (an MCP
+ * server instance handles many tool calls, so this is cached rather than
+ * re-resolved per call). `--port` short-circuits everything else.
+ */
+async function resolveTarget(): Promise<ResolveResult> {
+    if (cachedTarget) return cachedTarget;
+
+    const flag = portFlag();
+    if (flag !== undefined) {
+        cachedTarget = { port: flag, matchedRoot: null, source: 'flag' };
+        return cachedTarget;
+    }
+
+    const candidates = readAllDescriptors(os.tmpdir());
+    const alivePings = await Promise.all(candidates.map(d => pingDescriptor(d.port)));
+    const alive = candidates.filter((_, i) => alivePings[i]);
+
+    try {
+        cachedTarget = resolvePort(alive, { cwd: process.cwd() });
+        return cachedTarget;
+    } catch (e) {
+        if (e instanceof AmbiguousPortError) throw e;
+        if (!(e instanceof NoServerError)) throw e;
+    }
+
+    // Fall back to the deprecated single-window pointer, for a window still
+    // running a pre-F1 build. Multiple such windows would silently misroute —
+    // that is exactly the bug this whole mechanism replaces — so this path
+    // only exists for a one-release upgrade grace period.
+    const legacy = legacyPort();
+    if (legacy !== null && await pingLegacy(legacy)) {
+        process.stderr.write(
+            '[diff-review] Warning: resolved via the deprecated global port file. ' +
+            'If multiple VS Code windows are open, this may be the wrong one. Update the extension to fix this.\n'
+        );
+        cachedTarget = { port: legacy, matchedRoot: null, source: 'sole-live' };
+        return cachedTarget;
+    }
+
+    throw new NoServerError();
+}
+
+function pingLegacy(port: number): Promise<boolean> {
+    return new Promise(resolve => {
+        const req = http.get(`http://127.0.0.1:${port}/health`, res => { res.resume(); resolve(res.statusCode === 200); });
+        req.on('error', () => resolve(false));
+        req.setTimeout(800, () => { req.destroy(); resolve(false); });
+    });
+}
 
 // ---------- IPC Client ----------
 
-function getPort(): number {
-    // Check --port flag
-    const portIdx = process.argv.indexOf('--port');
-    if (portIdx !== -1 && process.argv[portIdx + 1]) {
-        return parseInt(process.argv[portIdx + 1], 10);
-    }
-    // Read from port file
-    const portFile = path.join(os.tmpdir(), 'diff-review-port');
-    if (fs.existsSync(portFile)) {
-        return parseInt(fs.readFileSync(portFile, 'utf-8').trim(), 10);
-    }
-    throw new Error('Cannot find Diff Review IPC port. Is the VS Code extension running?');
-}
-
-function ipcGet(endpoint: string): Promise<any> {
-    const port = getPort();
+function ipcGet(endpoint: string, port: number): Promise<any> {
     return new Promise((resolve, reject) => {
         const req = http.get(`http://127.0.0.1:${port}${endpoint}`, (res) => {
             const chunks: Buffer[] = [];
@@ -51,13 +141,13 @@ function ipcGet(endpoint: string): Promise<any> {
     });
 }
 
-function ipcPost(endpoint: string, data: any): Promise<any> {
-    const port = getPort();
-    const body = JSON.stringify(data);
+async function ipcPost(endpoint: string, data: any): Promise<any> {
+    const target = await resolveTarget();
+    const body = JSON.stringify({ ...data, expectWorkspaceRoot: target.matchedRoot ?? undefined });
     return new Promise((resolve, reject) => {
         const req = http.request({
             hostname: '127.0.0.1',
-            port,
+            port: target.port,
             path: endpoint,
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
@@ -67,7 +157,13 @@ function ipcPost(endpoint: string, data: any): Promise<any> {
             res.on('end', () => {
                 try {
                     const result = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-                    if (res.statusCode && res.statusCode >= 400) {
+                    if (res.statusCode === 409) {
+                        reject(new Error(
+                            `This request was routed to a window scoped to [${(result.have ?? []).join(', ') || 'no workspace folder'}], ` +
+                            `not the workspace this call expected (${target.matchedRoot}). Another VS Code window may own your comments — ` +
+                            'run "Diff Review: Show MCP Server Info" to check.'
+                        ));
+                    } else if (res.statusCode && res.statusCode >= 400) {
                         reject(new Error(result.error || `HTTP ${res.statusCode}`));
                     } else {
                         resolve(result);
@@ -98,13 +194,15 @@ server.tool(
     {},
     async () => {
         try {
-            const state = await ipcGet('/comments');
+            const target = await resolveTarget();
+            const state = await ipcGet('/comments', target.port);
             if (!state.threads || state.threads.length === 0) {
                 return { content: [{ type: 'text' as const, text: 'No review comments.' }] };
             }
             const lines = state.threads.map((t: any) => {
                 const comments = t.comments.map((c: any) => `  [${c.role}] ${c.body}`).join('\n');
-                return `#${t.id} | ${t.uri}:${t.startLine + 1} | ${t.status.toUpperCase()}\n${comments}`;
+                const location = t.status === 'drifted' ? `DRIFTED (was ${t.uri}:${t.startLine + 1})` : `${t.uri}:${t.startLine + 1}`;
+                return `#${t.id} | ${location} | ${t.status.toUpperCase()}\n${comments}`;
             });
             return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
         } catch (e: any) {

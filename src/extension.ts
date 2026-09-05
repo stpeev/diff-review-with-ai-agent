@@ -3,35 +3,17 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { LAUNCHER_FILE, POINTER_FILE, STATE_DIR, Resolution, fromEnv, fromPointerFile, resolveServer } from './mcp-resolve';
 import { McpConsumerTarget, discoverConsumers, register, renderSnippet, snippetDestination } from './mcp-consumers';
-
-// --------------- Types ---------------
-
-type Role = 'user' | 'agent';
-
-interface SerializedComment {
-    id: number;
-    role: Role;
-    body: string;
-    timestamp: string;
-}
-
-interface SerializedThread {
-    id: number;
-    uri: string;
-    startLine: number;
-    endLine: number;
-    status: 'open' | 'resolved';
-    comments: SerializedComment[];
-}
-
-interface SerializedState {
-    version: 1;
-    nextThreadId: number;
-    nextCommentId: number;
-    threads: SerializedThread[];
-}
+import { isAncestor } from './path-util';
+import * as ipcDiscovery from './ipc-discovery';
+import * as scopeIdMod from './scope-id';
+import {
+    Role, ThreadStatus, SerializedComment, SerializedThread, BranchState, ScopeFile,
+    emptyBranch, emptyScopeFile, mergeScopeFiles,
+    hashAnchor, anchorContextSnippet, findAnchorLine,
+} from './comment-store';
 
 // --------------- Comment Model ---------------
 
@@ -49,6 +31,10 @@ class ReviewComment implements vscode.Comment {
 
     constructor(body: string, role: Role, id?: number, createdAt?: string) {
         this.id = id ?? nextCommentId++;
+        // A loaded comment passes its persisted id and bypasses the ++ above —
+        // without this, a freshly created comment in a new session could reuse
+        // an id already held by something we just loaded from disk.
+        if (this.id >= nextCommentId) nextCommentId = this.id + 1;
         this.body = body;
         this.role = role;
         this.mode = vscode.CommentMode.Preview;
@@ -63,20 +49,52 @@ class ReviewComment implements vscode.Comment {
 
 // --------------- Thread Tracking ---------------
 
+interface ThreadMeta {
+    anchorHash?: string;
+    anchorContext?: string;
+    updatedAt: string;
+}
+
+/** A comment whose anchor could not be found on load or after an edit. It has
+ *  no `vscode.CommentThread` — per the durability spec, a drifted comment
+ *  leaves the gutter rather than sit at a line it no longer describes. */
+interface DriftedRecord {
+    id: number;
+    uri: string;
+    lastKnownLine: number;
+    status: ThreadStatus;
+    comments: SerializedComment[];
+    anchorContext?: string;
+    updatedAt: string;
+}
+
 const threadMap = new Map<number, vscode.CommentThread>();
 const threadIds = new WeakMap<vscode.CommentThread, number>();
+const threadMeta = new WeakMap<vscode.CommentThread, ThreadMeta>();
+const driftedMap = new Map<number, DriftedRecord>();
 let nextThreadId = 1;
 
-function trackThread(thread: vscode.CommentThread, id?: number): number {
+function trackThread(thread: vscode.CommentThread, id?: number, meta?: Partial<ThreadMeta>): number {
     const tid = id ?? nextThreadId++;
+    // Same reasoning as the comment-id bump above: a loaded thread passes its
+    // persisted id, so the counter must be kept ahead of every id we have
+    // ever seen, not just ones minted in this session.
+    if (tid >= nextThreadId) nextThreadId = tid + 1;
     threadMap.set(tid, thread);
     threadIds.set(thread, tid);
+    threadMeta.set(thread, { updatedAt: new Date().toISOString(), ...meta });
     return tid;
 }
 
 function untrackThread(thread: vscode.CommentThread): void {
     const id = threadIds.get(thread);
     if (id !== undefined) threadMap.delete(id);
+}
+
+function touchThread(thread: vscode.CommentThread) {
+    const meta = threadMeta.get(thread);
+    if (meta) meta.updatedAt = new Date().toISOString();
+    else threadMeta.set(thread, { updatedAt: new Date().toISOString() });
 }
 
 function findThreadForComment(commentId: number): vscode.CommentThread | undefined {
@@ -100,9 +118,25 @@ function getThreadsByFile(): Map<string, { id: number; thread: vscode.CommentThr
     return byFile;
 }
 
+function getDriftedByFile(): Map<string, DriftedRecord[]> {
+    const byFile = new Map<string, DriftedRecord[]>();
+    for (const rec of driftedMap.values()) {
+        const rel = vscode.workspace.asRelativePath(vscode.Uri.parse(rec.uri));
+        if (!byFile.has(rel)) byFile.set(rel, []);
+        byFile.get(rel)!.push(rec);
+    }
+    return byFile;
+}
+
 function threadPreview(thread: vscode.CommentThread): string {
     const first = thread.comments[0];
     const text = typeof first.body === 'string' ? first.body : first.body.value;
+    return text.length > 55 ? text.substring(0, 52) + '...' : text;
+}
+
+function driftedPreview(rec: DriftedRecord): string {
+    const first = rec.comments[0];
+    const text = first ? first.body : '';
     return text.length > 55 ? text.substring(0, 52) + '...' : text;
 }
 
@@ -110,189 +144,652 @@ function resolveThread(thread: vscode.CommentThread) {
     thread.label = '✅ Resolved';
     thread.contextValue = 'resolved';
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    touchThread(thread);
 }
 
 function unresolveThread(thread: vscode.CommentThread) {
     thread.label = 'Open';
     thread.contextValue = 'open';
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    touchThread(thread);
 }
 
 // --------------- Status Bar ---------------
 
 let statusBar: vscode.StatusBarItem;
+let extensionContext: vscode.ExtensionContext;
+let activeController: vscode.CommentController | undefined;
+let outputLog: vscode.OutputChannel;
 
 function refresh() {
     const n = threadMap.size;
     const open = [...threadMap.values()].filter(t => t.contextValue !== 'resolved').length;
-    if (n > 0) {
-        statusBar.text = `$(comment-discussion) ${open} open · ${n - open} resolved`;
+    const drifted = driftedMap.size;
+    const parts: string[] = [];
+    if (n > 0) parts.push(`${open} open · ${n - open} resolved`);
+    if (drifted > 0) parts.push(`${drifted} drifted`);
+
+    if (parts.length > 0) {
+        statusBar.text = `$(comment-discussion) ${parts.join(' · ')}`;
+        statusBar.tooltip = noWorkspaceWarned
+            ? 'Click to view review comments. Some comments in this window are not being saved — see the output log.'
+            : 'Click to view review comments';
+        statusBar.show();
+    } else if (noWorkspaceWarned) {
+        // No comments yet, but this window already can't persist any — a
+        // silent empty status bar would hide that entirely.
+        statusBar.text = '$(warning) Diff Review: not persisted';
+        statusBar.tooltip = 'This window has no workspace folder open — comments will not be saved.';
         statusBar.show();
     } else {
         statusBar.hide();
     }
 }
 
-// --------------- Persistence (branch-scoped) ---------------
+// --------------- Scope & Folder State Machine (F2 + F3) ---------------
 
-let extensionContext: vscode.ExtensionContext;
-let activeController: vscode.CommentController | undefined;
-let currentBranchKey: string = '_default';
-let outputLog: vscode.OutputChannel;
+type FolderGitState = 'git' | 'pending' | 'plain';
+
+interface FolderInfo {
+    /** The workspace folder path this describes (as VS Code reports it). */
+    folderPath: string;
+    /** Symlink-resolved form of `folderPath`, used for scope hashing and ancestor checks. */
+    realPath: string;
+    state: FolderGitState;
+    /** Set once resolved: `remote:...` / `repo:...` (git) or `folder:...` (plain). */
+    scopeId?: string;
+    /** Branch name, `_detached.<sha>`, or `_default` for scopes with no branch concept. */
+    branchKey?: string;
+    /** Absolute path to this scope's comments.json, once scopeId is known. */
+    filePath?: string;
+    pendingSince?: number;
+    needsFlushOnSettle?: boolean;
+    lastKnownFile?: ScopeFile;
+    lastLoadedRevision: number;
+    consecutiveSaveFailures: number;
+    saveTimer?: ReturnType<typeof setTimeout>;
+    suppressWatcherUntil?: number;
+    watcher?: vscode.FileSystemWatcher;
+    /** The matching `vscode.git` repository, once found. */
+    repo?: any;
+}
+
+const PENDING_TIMEOUT_MS = 10_000;
+const LINE_TRACKING_DEBOUNCE_MS = 500;
+
+let folders: FolderInfo[] = [];
+/** True once we have logged that this window has files with nowhere to persist to. */
+let noWorkspaceWarned = false;
+const writerId = crypto.randomUUID();
+/** All writes — across every folder's scope — go through one chain so concurrent saves cannot interleave (F5). */
+let writeChain: Promise<void> = Promise.resolve();
 
 function getGitApi(): any | undefined {
     const gitExtension = vscode.extensions.getExtension('vscode.git');
-    if (!gitExtension?.isActive) return undefined;
-    return gitExtension.exports.getAPI(1);
+    if (!gitExtension) return undefined;
+    if (gitExtension.isActive) return gitExtension.exports.getAPI(1);
+    return undefined;
 }
 
-function getBranchKey(): string {
+async function activateGitApi(): Promise<any | undefined> {
+    const gitExtension = vscode.extensions.getExtension('vscode.git');
+    if (!gitExtension) return undefined;
     try {
-        const git = getGitApi();
-        if (!git) return '_default';
-        const repos = git.repositories;
-        if (!repos || repos.length === 0) return '_default';
-        // Use first repo (most common case)
-        const repo = repos[0];
-        const repoName = path.basename(repo.rootUri.fsPath);
-        const branch = repo.state?.HEAD?.name || '_detached';
-        return `${repoName}.${branch}`;
+        const exports = gitExtension.isActive ? gitExtension.exports : await gitExtension.activate();
+        return exports.getAPI(1);
     } catch {
-        return '_default';
+        return undefined;
     }
 }
 
-function stateKey(branchKey?: string): string {
-    return `diffReview.state.${branchKey ?? currentBranchKey}`;
+function hasDotGitAbove(startDir: string): boolean {
+    let dir = path.resolve(startDir);
+    for (;;) {
+        try {
+            if (fs.existsSync(path.join(dir, '.git'))) return true;
+        } catch {
+            // ignore and keep walking
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) return false;
+        dir = parent;
+    }
 }
 
-function serializeState(): SerializedState {
-    const threads: SerializedThread[] = [];
+function realpathOrSelf(p: string): string {
+    try {
+        return fs.realpathSync(p);
+    } catch {
+        return p;
+    }
+}
+
+function shortSha(sha: string | undefined): string {
+    return (sha ?? 'unknown').slice(0, 8);
+}
+
+function scopeDirFor(scopeId: string): string {
+    return path.join(globalStorageRoot(), 'scopes', scopeIdMod.scopeDirName(scopeId));
+}
+
+function globalStorageRoot(): string {
+    return extensionContext.globalStorageUri.fsPath;
+}
+
+/**
+ * Classify one workspace folder and, for git repos, resolve the scope id.
+ * Filesystem existence of `.git` is checked synchronously and independently
+ * of `vscode.git` — it only decides whether waiting for the extension is
+ * worthwhile, never the scope id itself, so a hand-rolled walk can never
+ * disagree with the extension about where a repo's root actually is.
+ */
+async function classifyFolder(folder: FolderInfo): Promise<void> {
+    const realPath = folder.realPath;
+    if (!hasDotGitAbove(realPath)) {
+        folder.state = 'plain';
+        folder.scopeId = scopeIdMod.scopeIdForFolder(realPath);
+        folder.branchKey = '_default';
+        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: plain (no .git found)`);
+        settleFolder(folder);
+        return;
+    }
+
+    folder.state = 'pending';
+    folder.pendingSince = Date.now();
+    const resolved = await tryResolveGitScope(folder);
+    if (resolved) return;
+
+    // Bounded wait: poll briefly for the git extension/repo to show up, then
+    // degrade to `plain` rather than staying stuck on `pending` forever.
+    const deadline = Date.now() + PENDING_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 500));
+        if (await tryResolveGitScope(folder)) return;
+    }
+
+    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: git extension never reported this repo — degrading to plain`);
+    folder.state = 'plain';
+    folder.scopeId = scopeIdMod.scopeIdForFolder(realPath);
+    folder.branchKey = '_default';
+    settleFolder(folder);
+}
+
+/** Attempt to resolve `folder` against `vscode.git`. Returns true once `state` has settled to `git`. */
+async function tryResolveGitScope(folder: FolderInfo): Promise<boolean> {
+    const git = await activateGitApi();
+    if (!git) return false;
+    const repo = git.repositories.find((r: any) => isAncestor(realpathOrSelf(r.rootUri.fsPath), folder.realPath));
+    if (!repo) return false;
+
+    folder.repo = repo;
+    const repoRealPath = realpathOrSelf(repo.rootUri.fsPath);
+    const remoteUrl: string | undefined = repo.state.remotes?.[0]?.fetchUrl || repo.state.remotes?.[0]?.pushUrl;
+    folder.scopeId = remoteUrl ? scopeIdMod.scopeIdForRemote(remoteUrl) : scopeIdMod.scopeIdForRepo(repoRealPath);
+    folder.branchKey = repo.state.HEAD?.name || `_detached.${shortSha(repo.state.HEAD?.commit)}`;
+    folder.state = 'git';
+    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: git — scope ${folder.scopeId}, branch ${folder.branchKey}`);
+
+    registerRepoWatcher(folder, repo);
+    settleFolder(folder);
+    return true;
+}
+
+function registerRepoWatcher(folder: FolderInfo, repo: any) {
+    repo.state.onDidChange(() => {
+        const newBranchKey = repo.state.HEAD?.name || `_detached.${shortSha(repo.state.HEAD?.commit)}`;
+        if (folder.branchKey && newBranchKey !== folder.branchKey) {
+            switchFolderBranch(folder, newBranchKey);
+        }
+    });
+}
+
+/** Called once a folder's scope/branch is known: sets `filePath`, loads its threads, flushes any deferred save. */
+function settleFolder(folder: FolderInfo) {
+    folder.filePath = path.join(scopeDirFor(folder.scopeId!), 'comments.json');
+    migrateLegacyStateIfPresent(folder);
+    loadFolderThreads(folder);
+    refresh();
+    if (folder.needsFlushOnSettle) {
+        folder.needsFlushOnSettle = false;
+        scheduleSave(folder);
+    }
+}
+
+function ownerFolderForUri(uri: vscode.Uri): FolderInfo | undefined {
+    if (uri.scheme !== 'file') return undefined;
+    // Pending folders are eligible owners too — performScopeSave already
+    // defers (needsFlushOnSettle) rather than writing for those, and treating
+    // "not settled yet" the same as "truly outside any folder" would wrongly
+    // flag an ordinary slow-to-activate repo as unable to persist at all.
+    const candidates = folders.map(f => ({ scopeId: f.scopeId ?? '__pending__', folderRealPath: f.realPath, folder: f }));
+    const match = scopeIdMod.deepestScopeForFile(candidates, uri.fsPath);
+    return (match as any)?.folder;
+}
+
+function threadsOwnedByFolder(folder: FolderInfo): { threadIds: number[]; driftedIds: number[] } {
+    const owned = { threadIds: [] as number[], driftedIds: [] as number[] };
     for (const [id, thread] of threadMap) {
+        if (ownerFolderForUri(thread.uri) === folder) owned.threadIds.push(id);
+    }
+    for (const [id, rec] of driftedMap) {
+        if (ownerFolderForUri(vscode.Uri.parse(rec.uri)) === folder) owned.driftedIds.push(id);
+    }
+    return owned;
+}
+
+// --------------- Legacy workspaceState migration ---------------
+
+interface LegacySerializedState {
+    version: 1;
+    nextThreadId: number;
+    nextCommentId: number;
+    threads: SerializedThread[];
+}
+
+/** Reproduces the pre-F2/F3 `stateKey()` derivation, for migration only. Safe to delete once no one runs the old build any more. */
+function legacyStateKeyFor(folder: FolderInfo): string | undefined {
+    if (folder.state === 'git' && folder.repo) {
+        const repoName = path.basename(folder.repo.rootUri.fsPath);
+        const branch = folder.repo.state?.HEAD?.name || '_detached';
+        return `diffReview.state.${repoName}.${branch}`;
+    }
+    return undefined;
+}
+
+function migrateLegacyStateIfPresent(folder: FolderInfo) {
+    try {
+        if (fs.existsSync(folder.filePath!)) return; // new store already has data for this scope
+        const key = legacyStateKeyFor(folder);
+        if (!key) return;
+        const legacy = extensionContext.workspaceState.get<LegacySerializedState>(key);
+        if (!legacy || !legacy.threads || legacy.threads.length === 0) return;
+
+        const branch: BranchState = { nextThreadId: legacy.nextThreadId, nextCommentId: legacy.nextCommentId, threads: legacy.threads.map(t => ({ ...t, updatedAt: new Date(0).toISOString() })) };
+        const file = emptyScopeFile(writerId);
+        file.branches[folder.branchKey!] = branch;
+        fs.mkdirSync(path.dirname(folder.filePath!), { recursive: true });
+        fs.writeFileSync(folder.filePath!, JSON.stringify(file));
+        outputLog.appendLine(`[Diff Review] Migrated ${legacy.threads.length} thread(s) from legacy key ${key} into ${folder.scopeId}`);
+    } catch (e: any) {
+        outputLog.appendLine(`[Diff Review] Legacy migration skipped for ${folder.folderPath}: ${e.message}`);
+    }
+}
+
+// --------------- Scope File I/O (F3 + F5) ---------------
+
+function readScopeFileOrEmpty(filePath: string): ScopeFile {
+    try {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.branches) return parsed as ScopeFile;
+        throw new Error('malformed scope file');
+    } catch (e: any) {
+        if (e.code !== 'ENOENT') outputLog.appendLine(`[Diff Review] Could not read ${filePath}, starting empty: ${e.message}`);
+        return emptyScopeFile(writerId);
+    }
+}
+
+function writeFileAtomic(filePath: string, content: string) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const tmp = `${filePath}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, content, 'utf-8');
+    fs.renameSync(tmp, filePath);
+}
+
+function writeMeta(folder: FolderInfo, file: ScopeFile) {
+    try {
+        const total = Object.values(file.branches).reduce((sum, b) => sum + b.threads.length, 0);
+        const meta = {
+            scopeId: folder.scopeId,
+            lastKnownPath: folder.folderPath,
+            label: path.basename(folder.folderPath),
+            commentCount: total,
+            updatedAt: new Date().toISOString(),
+        };
+        writeFileAtomic(path.join(scopeDirFor(folder.scopeId!), 'meta.json'), JSON.stringify(meta));
+    } catch {
+        // meta.json is advisory (recovery UI, not yet built) — never fail a save over it.
+    }
+}
+
+function currentBranchStateFromMemory(folder: FolderInfo): BranchState {
+    const owned = threadsOwnedByFolder(folder);
+    const threads: SerializedThread[] = [];
+    let maxThreadId = 0;
+    let maxCommentId = 0;
+
+    for (const id of owned.threadIds) {
+        const thread = threadMap.get(id)!;
+        const meta = threadMeta.get(thread);
+        const comments = thread.comments.map(c => {
+            const rc = c as ReviewComment;
+            maxCommentId = Math.max(maxCommentId, rc.id);
+            return { id: rc.id, role: rc.role, body: typeof rc.body === 'string' ? rc.body : rc.body.value, timestamp: rc.createdAt };
+        });
+        maxThreadId = Math.max(maxThreadId, id);
         threads.push({
-            id,
-            uri: thread.uri.toString(),
-            startLine: thread.range.start.line,
-            endLine: thread.range.end.line,
+            id, uri: thread.uri.toString(),
+            startLine: thread.range.start.line, endLine: thread.range.end.line,
             status: thread.contextValue === 'resolved' ? 'resolved' : 'open',
-            comments: thread.comments.map(c => {
-                const rc = c as ReviewComment;
-                return {
-                    id: rc.id,
-                    role: rc.role,
-                    body: typeof rc.body === 'string' ? rc.body : rc.body.value,
-                    timestamp: rc.createdAt,
-                };
-            }),
+            comments,
+            updatedAt: meta?.updatedAt ?? new Date().toISOString(),
+            anchorHash: meta?.anchorHash, anchorContext: meta?.anchorContext,
         });
     }
-    return { version: 1, nextThreadId, nextCommentId, threads };
+    for (const id of owned.driftedIds) {
+        const rec = driftedMap.get(id)!;
+        maxThreadId = Math.max(maxThreadId, id);
+        for (const c of rec.comments) maxCommentId = Math.max(maxCommentId, c.id);
+        threads.push({
+            id, uri: rec.uri, startLine: rec.lastKnownLine, endLine: rec.lastKnownLine,
+            status: rec.status, comments: rec.comments, updatedAt: rec.updatedAt,
+            anchorContext: rec.anchorContext, drifted: true,
+        });
+    }
+
+    return { nextThreadId: maxThreadId + 1, nextCommentId: maxCommentId + 1, threads };
 }
 
-function saveState() {
-    extensionContext.workspaceState.update(stateKey(), serializeState());
+function scheduleSave(folder: FolderInfo, debounceMs = 0) {
+    if (folder.saveTimer) clearTimeout(folder.saveTimer);
+    folder.saveTimer = setTimeout(() => {
+        folder.saveTimer = undefined;
+        writeChain = writeChain.then(() => performScopeSave(folder)).catch(err => {
+            outputLog.appendLine(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
+        });
+    }, debounceMs);
 }
 
-function clearThreads() {
-    for (const thread of threadMap.values()) thread.dispose();
-    threadMap.clear();
-    nextThreadId = 1;
-    nextCommentId = 1;
-}
+async function performScopeSave(folder: FolderInfo): Promise<void> {
+    if (folder.state === 'pending' || !folder.scopeId || !folder.filePath) {
+        folder.needsFlushOnSettle = true;
+        return;
+    }
+    try {
+        const onDisk = readScopeFileOrEmpty(folder.filePath);
+        const ourBranch = currentBranchStateFromMemory(folder);
+        let merged: ScopeFile;
 
-function loadStateFromKey(controller: vscode.CommentController, key: string) {
-    const data = extensionContext.workspaceState.get<SerializedState>(stateKey(key));
-    if (!data || !data.threads) return;
-
-    nextThreadId = data.nextThreadId || 1;
-    nextCommentId = data.nextCommentId || 1;
-
-    for (const st of data.threads) {
-        const uri = vscode.Uri.parse(st.uri);
-        const range = new vscode.Range(st.startLine, 0, st.endLine, 0);
-        const thread = controller.createCommentThread(uri, range, []);
-        const comments = st.comments.map(
-            sc => new ReviewComment(sc.body, sc.role, sc.id, sc.timestamp || new Date().toISOString())
-        );
-        thread.comments = comments;
-        thread.canReply = true;
-        if (st.status === 'resolved') {
-            thread.label = '✅ Resolved';
-            thread.contextValue = 'resolved';
-            thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+        if (folder.lastKnownFile && onDisk.revision === folder.lastLoadedRevision) {
+            // No one wrote since we last read: our in-memory branch state is
+            // authoritative and overwrites directly. Unioning against onDisk
+            // here — onDisk being nothing but our own prior write — would
+            // resurrect every thread we just deleted, since a deleted thread
+            // is (correctly) absent from memory but still union-kept from
+            // disk. Union only applies when there is a genuine other side.
+            merged = { ...onDisk, writerId, revision: onDisk.revision + 1, branches: { ...onDisk.branches, [folder.branchKey!]: ourBranch } };
         } else {
-            thread.label = 'Open';
-            thread.contextValue = 'open';
-            thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+            // A concurrent writer moved the revision past what we last saw —
+            // merge so their other-branch (or other-thread) writes are not
+            // clobbered. This is where the documented delete/union limitation
+            // applies: a thread deleted here but untouched on the other side
+            // still survives the merge (no tombstone until F6).
+            const base = folder.lastKnownFile ?? onDisk;
+            const mine: ScopeFile = { ...base, writerId, branches: { ...base.branches, [folder.branchKey!]: ourBranch } };
+            merged = mergeScopeFiles(mine, onDisk, writerId);
         }
-        trackThread(thread, st.id);
+
+        folder.suppressWatcherUntil = Date.now() + 500;
+        writeFileAtomic(folder.filePath, JSON.stringify(merged));
+        writeMeta(folder, merged);
+
+        folder.lastKnownFile = merged;
+        folder.lastLoadedRevision = merged.revision;
+        folder.consecutiveSaveFailures = 0;
+    } catch (e: any) {
+        folder.consecutiveSaveFailures = (folder.consecutiveSaveFailures ?? 0) + 1;
+        outputLog.appendLine(`[Diff Review] Save error for ${folder.folderPath} (attempt ${folder.consecutiveSaveFailures}): ${e.message}`);
+        if (folder.consecutiveSaveFailures === 3) {
+            vscode.window.showErrorMessage(
+                `Diff Review: comments in ${path.basename(folder.folderPath)} have failed to save ${folder.consecutiveSaveFailures} times in a row. Recent changes may be lost.`
+            );
+        }
+        throw e;
     }
 }
 
-function switchToBranch(controller: vscode.CommentController, newKey: string) {
-    if (newKey === currentBranchKey) return;
-
-    outputLog.appendLine(`[Diff Review] Branch switch: ${currentBranchKey} → ${newKey}`);
-
-    // Save current branch's comments
-    saveState();
-
-    // Clear current threads from UI
-    clearThreads();
-
-    const oldKey = currentBranchKey;
-    currentBranchKey = newKey;
-
-    // Try loading saved state for the new branch
-    const newData = extensionContext.workspaceState.get<SerializedState>(stateKey(newKey));
-
-    if (newData && newData.threads && newData.threads.length > 0) {
-        // New branch has its own saved comments — load them
-        loadStateFromKey(controller, newKey);
-        outputLog.appendLine(`[Diff Review] Loaded ${threadMap.size} comments for branch ${newKey}`);
-    } else {
-        // New branch has no saved comments — copy from the old branch (Option B)
-        loadStateFromKey(controller, oldKey);
-        if (threadMap.size > 0) {
-            // Save the copied state under the new branch key
-            saveState();
-            outputLog.appendLine(`[Diff Review] Inherited ${threadMap.size} comments from ${oldKey} to ${newKey}`);
-        } else {
-            outputLog.appendLine(`[Diff Review] No comments to inherit — clean slate for ${newKey}`);
+/** Every scheduled save's timer, flushed synchronously-as-possible at shutdown (F5). */
+async function flushAllSaves(): Promise<void> {
+    for (const folder of folders) {
+        if (folder.saveTimer) {
+            clearTimeout(folder.saveTimer);
+            folder.saveTimer = undefined;
+            writeChain = writeChain.then(() => performScopeSave(folder)).catch(() => {});
         }
     }
+    await writeChain;
+}
 
+/** Resolve the folder owning `thread.uri` and schedule its scope file to be saved. Threads outside every known folder are transient by design (F3: "no workspace folder" case). */
+function queueSaveForThread(thread: vscode.CommentThread, debounceMs = 0) {
+    const folder = ownerFolderForUri(thread.uri);
+    if (!folder) {
+        warnTransient();
+        return;
+    }
+    scheduleSave(folder, debounceMs);
+}
+
+function queueSaveForUri(uri: vscode.Uri, debounceMs = 0) {
+    const folder = ownerFolderForUri(uri);
+    if (!folder) { warnTransient(); return; }
+    scheduleSave(folder, debounceMs);
+}
+
+function warnTransient() {
+    if (!noWorkspaceWarned) {
+        noWorkspaceWarned = true;
+        outputLog.appendLine('[Diff Review] A comment was added on a file outside any open workspace folder — it will not be saved.');
+    }
     refresh();
 }
 
-function setupBranchWatcher(context: vscode.ExtensionContext, controller: vscode.CommentController) {
-    try {
-        const git = getGitApi();
-        if (!git) {
-            outputLog.appendLine('[Diff Review] Git API not available — branch scoping disabled');
-            return;
-        }
-        for (const repo of git.repositories) {
-            repo.state.onDidChange(() => {
-                const newKey = getBranchKey();
-                if (newKey !== currentBranchKey) {
-                    switchToBranch(controller, newKey);
-                }
-            });
-        }
-        // Also watch for new repos being opened
-        git.onDidOpenRepository((repo: any) => {
-            repo.state.onDidChange(() => {
-                const newKey = getBranchKey();
-                if (newKey !== currentBranchKey) {
-                    switchToBranch(controller, newKey);
-                }
-            });
+// --------------- Loading threads for a settled folder ---------------
+
+/** Keeps the global id counters ahead of a loaded thread's id and its comments' ids — `trackThread`/`ReviewComment` do the same for live threads, but a drifted record is set directly into `driftedMap`, bypassing both. */
+function reserveIds(threadId: number, comments: SerializedComment[]) {
+    if (threadId >= nextThreadId) nextThreadId = threadId + 1;
+    for (const c of comments) if (c.id >= nextCommentId) nextCommentId = c.id + 1;
+}
+
+function instantiateThread(folder: FolderInfo, st: SerializedThread) {
+    if (st.drifted) {
+        reserveIds(st.id, st.comments);
+        driftedMap.set(st.id, {
+            id: st.id, uri: st.uri, lastKnownLine: st.startLine, status: st.status,
+            comments: st.comments, anchorContext: st.anchorContext, updatedAt: st.updatedAt,
         });
-        outputLog.appendLine(`[Diff Review] Branch watcher active, current: ${currentBranchKey}`);
-    } catch (e: any) {
-        outputLog.appendLine(`[Diff Review] Branch watcher setup failed: ${e.message}`);
+        return;
     }
+
+    const uri = vscode.Uri.parse(st.uri);
+    const verified = verifyOrLocateAnchor(folder, uri, st);
+    if (verified === 'drifted') {
+        reserveIds(st.id, st.comments);
+        driftedMap.set(st.id, {
+            id: st.id, uri: st.uri, lastKnownLine: st.startLine, status: st.status,
+            comments: st.comments, anchorContext: st.anchorContext, updatedAt: st.updatedAt,
+        });
+        return;
+    }
+
+    const line = typeof verified === 'number' ? verified : st.startLine;
+    const range = new vscode.Range(line, 0, line, 0);
+    const thread = activeController!.createCommentThread(uri, range, []);
+    const comments = st.comments.map(sc => new ReviewComment(sc.body, sc.role, sc.id, sc.timestamp || new Date().toISOString()));
+    thread.comments = comments;
+    thread.canReply = true;
+    if (st.status === 'resolved') {
+        thread.label = '✅ Resolved';
+        thread.contextValue = 'resolved';
+        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    } else {
+        thread.label = 'Open';
+        thread.contextValue = 'open';
+        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    }
+    trackThread(thread, st.id, { anchorHash: st.anchorHash, anchorContext: st.anchorContext, updatedAt: st.updatedAt });
+}
+
+const ANCHOR_CONTEXT_RADIUS = 2;
+const ANCHOR_SEARCH_RADIUS = 50;
+
+/**
+ * Drift ladder steps 1-3 (content re-verification) plus step 4 (ask git about
+ * a rename) — see the durability spec. Returns the line to use, or the
+ * literal string 'drifted' once every avenue is exhausted (step 5).
+ */
+function verifyOrLocateAnchor(folder: FolderInfo, uri: vscode.Uri, st: SerializedThread): number | 'drifted' {
+    if (!st.anchorHash) return st.startLine; // legacy data written before anchoring existed — best effort, self-heals on next save
+
+    let filePath = uri.fsPath;
+    if (!fs.existsSync(filePath)) {
+        const renamed = findRenameTarget(folder, uri);
+        if (renamed) filePath = renamed.fsPath;
+        else return 'drifted';
+    }
+
+    let lines: string[];
+    try {
+        lines = fs.readFileSync(filePath, 'utf-8').split(/\r\n|\n/);
+    } catch {
+        return 'drifted';
+    }
+
+    const found = findAnchorLine(lines, st.anchorHash, st.startLine, ANCHOR_CONTEXT_RADIUS, ANCHOR_SEARCH_RADIUS);
+    return found === undefined ? 'drifted' : found;
+}
+
+/** Step 4 of the drift ladder: ask git whether a missing file was renamed. */
+function findRenameTarget(folder: FolderInfo, uri: vscode.Uri): vscode.Uri | undefined {
+    const repo = folder.repo;
+    if (!repo) return undefined;
+    const changeLists = [repo.state.workingTreeChanges, repo.state.indexChanges].filter(Boolean);
+    for (const changes of changeLists) {
+        for (const change of changes) {
+            if (change.originalUri?.fsPath === uri.fsPath && change.uri) return change.uri;
+        }
+    }
+    return undefined;
+}
+
+function loadFolderThreads(folder: FolderInfo) {
+    const file = readScopeFileOrEmpty(folder.filePath!);
+    folder.lastKnownFile = file;
+    folder.lastLoadedRevision = file.revision;
+    const branch = file.branches[folder.branchKey!];
+    if (!branch || branch.threads.length === 0) return;
+    for (const st of branch.threads) instantiateThread(folder, st);
+    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: loaded ${branch.threads.length} thread(s) for ${folder.branchKey}`);
+}
+
+/** Branch changed in one repo: touches only that repo's threads (fixes the pre-F2 bug where switching branch in one repo wiped every repo's comments). */
+async function switchFolderBranch(folder: FolderInfo, newBranchKey: string) {
+    const oldBranchKey = folder.branchKey!;
+    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: branch ${oldBranchKey} → ${newBranchKey}`);
+
+    // Must actually complete before the reload below reads the file back —
+    // `writeChain` resolves later than this call returns, so without
+    // awaiting it the reload can race the write and load stale data.
+    await flushFolderSaveNow(folder);
+
+    const owned = threadsOwnedByFolder(folder);
+    for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
+    for (const id of owned.driftedIds) driftedMap.delete(id);
+
+    folder.branchKey = newBranchKey;
+    const file = readScopeFileOrEmpty(folder.filePath!);
+    folder.lastKnownFile = file;
+    folder.lastLoadedRevision = file.revision;
+
+    const newBranch = file.branches[newBranchKey];
+    if (newBranch && newBranch.threads.length > 0) {
+        for (const st of newBranch.threads) instantiateThread(folder, st);
+        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: loaded ${newBranch.threads.length} thread(s) for ${newBranchKey}`);
+    } else {
+        const oldBranch = file.branches[oldBranchKey];
+        if (oldBranch && oldBranch.threads.length > 0) {
+            for (const st of oldBranch.threads) instantiateThread(folder, st);
+            outputLog.appendLine(`[Diff Review] ${folder.folderPath}: inherited ${oldBranch.threads.length} thread(s) from ${oldBranchKey}`);
+            scheduleSave(folder);
+        }
+    }
+    refresh();
+}
+
+/** Flush used when switching branches, where an in-flight debounce must complete before the reload that follows reads the file back. */
+async function flushFolderSaveNow(folder: FolderInfo): Promise<void> {
+    if (folder.saveTimer) { clearTimeout(folder.saveTimer); folder.saveTimer = undefined; }
+    const p = writeChain.then(() => performScopeSave(folder)).catch(err => {
+        outputLog.appendLine(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
+    });
+    writeChain = p;
+    await p;
+}
+
+function watchFolderScope(folder: FolderInfo) {
+    if (!folder.filePath) return;
+    folder.watcher?.dispose();
+    const pattern = new vscode.RelativePattern(vscode.Uri.file(path.dirname(folder.filePath)), 'comments.json');
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    const onExternalChange = () => {
+        if (folder.suppressWatcherUntil && Date.now() < folder.suppressWatcherUntil) return; // our own write
+        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: external change to ${folder.filePath}, reloading`);
+        const owned = threadsOwnedByFolder(folder);
+        for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
+        for (const id of owned.driftedIds) driftedMap.delete(id);
+        loadFolderThreads(folder);
+        refresh();
+    };
+    watcher.onDidChange(onExternalChange);
+    watcher.onDidCreate(onExternalChange);
+    folder.watcher = watcher;
+    extensionContext.subscriptions.push(watcher);
+}
+
+// --------------- Discover workspace folders at activation ---------------
+
+async function discoverFolders(): Promise<void> {
+    const wsFolders = vscode.workspace.workspaceFolders ?? [];
+    if (wsFolders.length === 0) {
+        outputLog.appendLine('[Diff Review] No workspace folder open — comments in this window will not be persisted.');
+        return;
+    }
+    for (const wf of wsFolders) {
+        const folder: FolderInfo = {
+            folderPath: wf.uri.fsPath,
+            realPath: realpathOrSelf(wf.uri.fsPath),
+            state: 'pending',
+            lastLoadedRevision: 0,
+            consecutiveSaveFailures: 0,
+        };
+        folders.push(folder);
+        classifyFolder(folder).then(() => {
+            if (folder.state === 'git') watchFolderScope(folder);
+            else if (folder.state === 'plain') watchFolderScope(folder);
+        });
+    }
+}
+
+function setupBranchWatcher(context: vscode.ExtensionContext) {
+    const gitExtension = vscode.extensions.getExtension('vscode.git');
+    if (!gitExtension) {
+        outputLog.appendLine('[Diff Review] Git extension not found — branch scoping disabled for this window.');
+        return;
+    }
+    activateGitApi().then(git => {
+        if (!git) return;
+        // A repo opened after our initial classification pass (e.g. `git init`
+        // in a plain folder, or a slow-to-register nested repo) should be
+        // re-evaluated immediately, not just wait for its own future changes.
+        git.onDidOpenRepository(() => {
+            for (const folder of folders) {
+                if (folder.state !== 'git') classifyFolder(folder).then(() => {
+                    if (folder.state === 'git') watchFolderScope(folder);
+                });
+            }
+        });
+    });
 }
 
 // --------------- Line Tracking ---------------
@@ -302,7 +799,6 @@ function setupLineTracking(context: vscode.ExtensionContext) {
         vscode.workspace.onDidChangeTextDocument(e => {
             if (e.contentChanges.length === 0) return;
 
-            // Only track changes for documents that have comment threads
             const docUri = e.document.uri.toString();
             const affected: vscode.CommentThread[] = [];
             for (const thread of threadMap.values()) {
@@ -315,10 +811,15 @@ function setupLineTracking(context: vscode.ExtensionContext) {
                 (a, b) => b.range.start.line - a.range.start.line
             );
 
+            // Threads whose anchored line fell inside a shrunk range need
+            // re-verification against the live document rather than a blind
+            // shift — otherwise a comment inside a deleted block silently
+            // stays put, now pointing at whatever slid up into it.
+            const needsReverify = new Set<vscode.CommentThread>();
+
             for (const change of changes) {
                 const startLine = change.range.start.line;
                 const oldEndLine = change.range.end.line;
-                // Normalize CRLF → LF before counting newlines
                 const normalizedText = change.text.replace(/\r\n/g, '\n');
                 const newLines = normalizedText.split('\n').length - 1;
                 const oldLines = oldEndLine - startLine;
@@ -334,24 +835,113 @@ function setupLineTracking(context: vscode.ExtensionContext) {
                         if (newStart >= 0) {
                             thread.range = new vscode.Range(newStart, 0, newEnd, 0);
                         }
+                    } else if (threadLine >= startLine && threadLine <= oldEndLine && delta < 0) {
+                        needsReverify.add(thread);
                     }
                 }
             }
 
-            saveState();
+            if (needsReverify.size > 0) {
+                const liveLines = e.document.getText().split(/\r\n|\n/);
+                for (const thread of needsReverify) {
+                    const meta = threadMeta.get(thread);
+                    if (!meta?.anchorHash) continue; // no anchor to check against — leave the old shift behavior
+                    const found = findAnchorLine(liveLines, meta.anchorHash, thread.range.start.line, ANCHOR_CONTEXT_RADIUS, ANCHOR_SEARCH_RADIUS);
+                    if (found !== undefined) {
+                        thread.range = new vscode.Range(found, 0, found, 0);
+                    } else {
+                        driftThread(thread);
+                    }
+                }
+            }
+
+            for (const thread of affected) {
+                if (threadMap.has(threadIds.get(thread) ?? -1)) queueSaveForThread(thread, LINE_TRACKING_DEBOUNCE_MS);
+            }
         })
     );
+}
+
+/** Move a live thread into `driftedMap`: it has no trustworthy line any more, so it leaves the gutter (F4). */
+function driftThread(thread: vscode.CommentThread) {
+    const id = threadIds.get(thread);
+    if (id === undefined) return;
+    const meta = threadMeta.get(thread);
+    const comments = thread.comments.map(c => {
+        const rc = c as ReviewComment;
+        return { id: rc.id, role: rc.role, body: typeof rc.body === 'string' ? rc.body : rc.body.value, timestamp: rc.createdAt };
+    });
+    driftedMap.set(id, {
+        id, uri: thread.uri.toString(), lastKnownLine: thread.range.start.line,
+        status: thread.contextValue === 'resolved' ? 'resolved' : 'open',
+        comments, anchorContext: meta?.anchorContext, updatedAt: new Date().toISOString(),
+    });
+    threadMap.delete(id);
+    thread.dispose();
+    queueSaveForUri(vscode.Uri.parse(driftedMap.get(id)!.uri));
+    refresh();
+    outputLog.appendLine(`[Diff Review] Thread #${id} drifted — its anchor is no longer found in the file.`);
 }
 
 // --------------- IPC HTTP Server ---------------
 
 let ipcServer: http.Server | undefined;
 let ipcPort: number = 0;
+let myWorkspaceRoots: string[] = [];
+let descriptorFilePath: string | undefined;
+
+async function pingCandidate(port: number, timeoutMs = 800): Promise<boolean> {
+    return new Promise(resolve => {
+        const req = http.get(`http://127.0.0.1:${port}/ping`, res => {
+            res.resume();
+            resolve(res.statusCode === 200);
+        });
+        req.on('error', () => resolve(false));
+        req.setTimeout(timeoutMs, () => { req.destroy(); resolve(false); });
+    });
+}
+
+async function sweepStaleDescriptors(tmpDir: string): Promise<void> {
+    const dir = ipcDiscovery.descriptorDir(tmpDir);
+    let entries: string[];
+    try {
+        entries = fs.readdirSync(dir);
+    } catch {
+        return;
+    }
+    for (const entry of entries) {
+        if (!entry.endsWith('.json')) continue;
+        const file = path.join(dir, entry);
+        try {
+            const d = JSON.parse(fs.readFileSync(file, 'utf-8'));
+            if (typeof d.port !== 'number' || !(await pingCandidate(d.port))) {
+                fs.unlinkSync(file);
+                outputLog.appendLine(`[Diff Review] Swept stale IPC descriptor ${entry}`);
+            }
+        } catch {
+            try { fs.unlinkSync(file); } catch { /* already gone */ }
+        }
+    }
+}
+
+function checkWorkspaceRoot(expected: string | undefined): boolean {
+    if (!expected) return true; // caller made no claim — permissive, matches manual/legacy callers
+    return myWorkspaceRoots.includes(expected);
+}
+
+function findThreadOrDrifted(threadId: number): { kind: 'live'; thread: vscode.CommentThread } | { kind: 'drifted'; rec: DriftedRecord } | undefined {
+    const thread = threadMap.get(threadId);
+    if (thread) return { kind: 'live', thread };
+    const rec = driftedMap.get(threadId);
+    if (rec) return { kind: 'drifted', rec };
+    return undefined;
+}
 
 function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
     return new Promise((resolve, reject) => {
+        myWorkspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
+
         const server = http.createServer(async (req, res) => {
-            // CORS headers for local use
             res.setHeader('Content-Type', 'application/json');
             res.setHeader('Access-Control-Allow-Origin', 'localhost');
 
@@ -359,72 +949,93 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
             const method = req.method || 'GET';
 
             try {
-                if (method === 'GET' && url.pathname === '/comments') {
-                    // List all comments
-                    const result = serializeState();
+                if (method === 'GET' && url.pathname === '/ping') {
                     res.writeHead(200);
-                    res.end(JSON.stringify(result));
+                    res.end(JSON.stringify({ workspaceRoots: myWorkspaceRoots, pid: process.pid }));
+                } else if (method === 'GET' && url.pathname === '/comments') {
+                    const threads = [
+                        ...[...threadMap.entries()].map(([id, t]) => ({
+                            id, uri: t.uri.toString(), startLine: t.range.start.line, endLine: t.range.end.line,
+                            status: t.contextValue === 'resolved' ? 'resolved' : 'open',
+                            comments: t.comments.map(c => ({ role: (c as ReviewComment).role, body: typeof c.body === 'string' ? c.body : c.body.value })),
+                        })),
+                        ...[...driftedMap.values()].map(rec => ({
+                            id: rec.id, uri: rec.uri, startLine: rec.lastKnownLine, endLine: rec.lastKnownLine,
+                            status: 'drifted', comments: rec.comments.map(c => ({ role: c.role, body: c.body })),
+                        })),
+                    ];
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ threads }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
                     const body = await readBody(req);
-                    const { threadId, text } = JSON.parse(body);
-                    const thread = threadMap.get(threadId);
-                    if (!thread) {
-                        res.writeHead(404);
-                        res.end(JSON.stringify({ error: `Thread #${threadId} not found` }));
-                        return;
+                    const { threadId, text, expectWorkspaceRoot } = JSON.parse(body);
+                    if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
+                    const found = findThreadOrDrifted(threadId);
+                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    if (found.kind === 'live') {
+                        const reply = new ReviewComment(text, 'agent');
+                        found.thread.comments = [...found.thread.comments, reply];
+                        found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+                        touchThread(found.thread);
+                        queueSaveForThread(found.thread);
+                        res.writeHead(200);
+                        res.end(JSON.stringify({ ok: true, commentId: reply.id }));
+                    } else {
+                        const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
+                        found.rec.comments.push(comment);
+                        found.rec.updatedAt = comment.timestamp;
+                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
+                        res.writeHead(200);
+                        res.end(JSON.stringify({ ok: true, commentId: comment.id, note: 'This thread is drifted — its original location was not found.' }));
                     }
-                    const reply = new ReviewComment(text, 'agent');
-                    thread.comments = [...thread.comments, reply];
-                    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-                    saveState();
-                    res.writeHead(200);
-                    res.end(JSON.stringify({ ok: true, commentId: reply.id }));
                 } else if (method === 'POST' && url.pathname === '/resolve') {
                     const body = await readBody(req);
-                    const { threadId } = JSON.parse(body);
-                    const thread = threadMap.get(threadId);
-                    if (!thread) {
-                        res.writeHead(404);
-                        res.end(JSON.stringify({ error: `Thread #${threadId} not found` }));
-                        return;
+                    const { threadId, expectWorkspaceRoot } = JSON.parse(body);
+                    if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
+                    const found = findThreadOrDrifted(threadId);
+                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    if (found.kind === 'live') {
+                        resolveThread(found.thread);
+                        refresh();
+                        queueSaveForThread(found.thread);
+                    } else {
+                        found.rec.status = 'resolved';
+                        found.rec.updatedAt = new Date().toISOString();
+                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
                     }
-                    resolveThread(thread);
-                    refresh();
-                    saveState();
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/unresolve') {
                     const body = await readBody(req);
-                    const { threadId } = JSON.parse(body);
+                    const { threadId, expectWorkspaceRoot } = JSON.parse(body);
+                    if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
                     const thread = threadMap.get(threadId);
-                    if (!thread) {
-                        res.writeHead(404);
-                        res.end(JSON.stringify({ error: `Thread #${threadId} not found` }));
-                        return;
-                    }
+                    if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
                     unresolveThread(thread);
                     refresh();
-                    saveState();
+                    queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/delete') {
                     const body = await readBody(req);
-                    const { threadId } = JSON.parse(body);
-                    const thread = threadMap.get(threadId);
-                    if (!thread) {
-                        res.writeHead(404);
-                        res.end(JSON.stringify({ error: `Thread #${threadId} not found` }));
-                        return;
+                    const { threadId, expectWorkspaceRoot } = JSON.parse(body);
+                    if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
+                    const found = findThreadOrDrifted(threadId);
+                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    if (found.kind === 'live') {
+                        threadMap.delete(threadId);
+                        found.thread.dispose();
+                        refresh();
+                        queueSaveForUri(found.thread.uri);
+                    } else {
+                        driftedMap.delete(threadId);
+                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
                     }
-                    threadMap.delete(threadId);
-                    thread.dispose();
-                    refresh();
-                    saveState();
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'GET' && url.pathname === '/health') {
                     res.writeHead(200);
-                    res.end(JSON.stringify({ ok: true, comments: threadMap.size }));
+                    res.end(JSON.stringify({ ok: true, comments: threadMap.size, drifted: driftedMap.size }));
                 } else {
                     res.writeHead(404);
                     res.end(JSON.stringify({ error: 'Not found' }));
@@ -435,15 +1046,33 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
             }
         });
 
-        // Listen on random available port
-        server.listen(0, '127.0.0.1', () => {
+        function respondMismatch(res: http.ServerResponse) {
+            res.writeHead(409);
+            res.end(JSON.stringify({ error: 'workspace mismatch', have: myWorkspaceRoots }));
+        }
+
+        server.listen(0, '127.0.0.1', async () => {
             const addr = server.address();
             if (addr && typeof addr !== 'string') {
                 ipcPort = addr.port;
                 ipcServer = server;
-                // Write port file so MCP server can find us
-                const portFile = path.join(os.tmpdir(), 'diff-review-port');
-                fs.writeFileSync(portFile, String(ipcPort), 'utf-8');
+
+                const tmpDir = os.tmpdir();
+                await sweepStaleDescriptors(tmpDir);
+                const descriptor: ipcDiscovery.Descriptor = {
+                    port: ipcPort, workspaceRoots: myWorkspaceRoots, pid: process.pid, startedAt: new Date().toISOString(),
+                };
+                fs.mkdirSync(ipcDiscovery.descriptorDir(tmpDir), { recursive: true });
+                descriptorFilePath = ipcDiscovery.descriptorPath(tmpDir, myWorkspaceRoots, process.pid);
+                fs.writeFileSync(descriptorFilePath, JSON.stringify(descriptor), 'utf-8');
+
+                // Deprecated global pointer, kept for one release so an
+                // un-upgraded launcher still finds *a* window. New consumers
+                // should resolve through the descriptor directory above.
+                const legacyPortFile = path.join(tmpDir, 'diff-review-port');
+                fs.writeFileSync(legacyPortFile, String(ipcPort), 'utf-8');
+                outputLog.appendLine('[Diff Review] (deprecated) also wrote the legacy global port file — MCP clients should resolve via the per-window descriptor directory.');
+
                 resolve(ipcPort);
             } else {
                 reject(new Error('Failed to get server address'));
@@ -451,7 +1080,12 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
         });
 
         server.on('error', reject);
-        context.subscriptions.push({ dispose: () => { server.close(); try { fs.unlinkSync(path.join(os.tmpdir(), 'diff-review-port')); } catch {} } });
+        context.subscriptions.push({
+            dispose: () => {
+                server.close();
+                try { if (descriptorFilePath) fs.unlinkSync(descriptorFilePath); } catch { /* already gone */ }
+            }
+        });
     });
 }
 
@@ -488,6 +1122,23 @@ function deployMcpLauncher(context: vscode.ExtensionContext) {
     } catch (err) {
         // Non-fatal: everything except the MCP integration still works.
         outputLog.appendLine(`[Diff Review] Could not deploy MCP launcher: ${err}`);
+    }
+}
+
+/**
+ * Writes `~/.diff-review/storage-path`, pointing at this window's
+ * `globalStorageUri`. Nothing reads it yet — comments are still reached over
+ * the HTTP IPC server — but a future file-based reader (e.g. one running
+ * while the editor is closed) needs a way to find the directory without
+ * guessing the editor flavor and platform, the same problem the MCP launcher
+ * pointer already solves for the server path.
+ */
+function deployStoragePathPointer() {
+    try {
+        fs.mkdirSync(STATE_DIR, { recursive: true });
+        fs.writeFileSync(path.join(STATE_DIR, 'storage-path'), globalStorageRoot(), 'utf-8');
+    } catch (err) {
+        outputLog.appendLine(`[Diff Review] Could not write storage-path pointer: ${err}`);
     }
 }
 
@@ -605,13 +1256,19 @@ function collectMcpInfo(context: vscode.ExtensionContext): McpInfoRow[] {
             reveal: ownServer,
         });
 
-        const portFile = path.join(os.tmpdir(), 'diff-review-port');
         rows.push({
             label: '$(plug) IPC port',
             detail: ipcPort
-                ? `${ipcPort} — advertised in ${portFile}`
-                : `not listening — ${portFile} may be stale`,
+                ? `${ipcPort} — descriptor at ${homeShort(descriptorFilePath ?? '')}`
+                : `not listening — ${homeShort(ipcDiscovery.descriptorDir(os.tmpdir()))} may be stale`,
             copy: ipcPort ? String(ipcPort) : undefined,
+        });
+
+        rows.push({
+            label: '$(database) Comment storage',
+            detail: `${homeShort(globalStorageRoot())} — ${folders.length} folder(s) tracked`,
+            copy: globalStorageRoot(),
+            reveal: globalStorageRoot(),
         });
     }
 
@@ -656,6 +1313,357 @@ async function showMcpInfo(context: vscode.ExtensionContext) {
     picker.show();
 }
 
+// --------------- Activation ---------------
+
+export function activate(context: vscode.ExtensionContext) {
+    extensionContext = context;
+    outputLog = vscode.window.createOutputChannel('Diff Review');
+    outputLog.appendLine('[Diff Review] Activating...');
+
+    const controller = vscode.comments.createCommentController('diffReview', 'Diff Review');
+    activeController = controller;
+    context.subscriptions.push(controller);
+
+    controller.commentingRangeProvider = {
+        provideCommentingRanges(document: vscode.TextDocument) {
+            return [new vscode.Range(0, 0, document.lineCount - 1, 0)];
+        }
+    };
+
+    controller.options = {
+        prompt: 'Add review comment',
+        placeHolder: 'Describe the change you want (e.g. "rename this variable", "add error handling")'
+    };
+
+    // --- Status bar (MUST be created before loading/refresh) ---
+    statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+    statusBar.command = 'diffReview.showPanel';
+    statusBar.tooltip = 'Click to view review comments';
+    context.subscriptions.push(statusBar);
+
+    // --- Discover workspace folders, classify each (git/pending/plain), and
+    //     load its comments once settled (F2 + F3). ---
+    discoverFolders().then(() => refresh());
+    setupBranchWatcher(context);
+    refresh();
+
+    // --- Line tracking ---
+    setupLineTracking(context);
+
+    // --- MCP launcher + storage pointer ---
+    deployMcpLauncher(context);
+    deployStoragePathPointer();
+
+    // --- IPC Server ---
+    startIpcServer(context).then(port => {
+        outputLog.appendLine(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
+    }).catch(err => {
+        outputLog.appendLine(`[Diff Review] Failed to start IPC server: ${err}`);
+    });
+
+    // --- Create comment (first comment in a new thread) ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.createNote', (reply: vscode.CommentReply) => {
+            const thread = reply.thread;
+            const comment = new ReviewComment(reply.text, 'user');
+            thread.comments = [comment];
+            thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+            thread.canReply = true;
+            thread.label = 'Open';
+            thread.contextValue = 'open';
+            const anchor = computeAnchorForNewThread(thread);
+            trackThread(thread, undefined, anchor);
+            refresh();
+            queueSaveForThread(thread);
+        })
+    );
+
+    // --- Reply (additional comments in existing thread) ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.reply', (reply: vscode.CommentReply) => {
+            const thread = reply.thread;
+            const comment = new ReviewComment(reply.text, 'user');
+            thread.comments = [...thread.comments, comment];
+            touchThread(thread);
+            queueSaveForThread(thread);
+        })
+    );
+
+    // --- Edit comment ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.editComment', (comment: ReviewComment) => {
+            const thread = findThreadForComment(comment.id);
+            if (!thread) return;
+            thread.comments = thread.comments.map(c => {
+                if ((c as ReviewComment).id === comment.id) {
+                    const edited = c as ReviewComment;
+                    edited.mode = vscode.CommentMode.Editing;
+                    return edited;
+                }
+                return c;
+            });
+        })
+    );
+
+    // --- Save edited comment ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.saveEdit', (comment: ReviewComment) => {
+            const thread = findThreadForComment(comment.id);
+            if (!thread) return;
+            thread.comments = thread.comments.map(c => {
+                if ((c as ReviewComment).id === comment.id) {
+                    const saved = c as ReviewComment;
+                    saved.mode = vscode.CommentMode.Preview;
+                    return saved;
+                }
+                return c;
+            });
+            touchThread(thread);
+            queueSaveForThread(thread);
+        })
+    );
+
+    // --- Cancel edit ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.cancelEdit', (comment: ReviewComment) => {
+            const thread = findThreadForComment(comment.id);
+            if (!thread) return;
+            thread.comments = thread.comments.map(c => {
+                if ((c as ReviewComment).id === comment.id) {
+                    const cancelled = c as ReviewComment;
+                    cancelled.mode = vscode.CommentMode.Preview;
+                    return cancelled;
+                }
+                return c;
+            });
+        })
+    );
+
+    // --- Delete individual comment ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.deleteNote', (comment: ReviewComment) => {
+            const thread = findThreadForComment(comment.id);
+            if (!thread) return;
+            const uri = thread.uri;
+            if (thread.comments.length <= 1) {
+                untrackThread(thread);
+                thread.dispose();
+            } else {
+                thread.comments = thread.comments.filter(
+                    c => (c as ReviewComment).id !== comment.id
+                );
+                touchThread(thread);
+            }
+            refresh();
+            queueSaveForUri(uri);
+        })
+    );
+
+    // --- Send single thread to Copilot ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.sendThread', async (thread: vscode.CommentThread) => {
+            const prompt = await buildPrompt([thread]);
+            try {
+                await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
+            } catch {
+                await vscode.env.clipboard.writeText(prompt);
+                vscode.window.showInformationMessage('Prompt copied to clipboard.');
+            }
+        })
+    );
+
+    // --- Resolve thread ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.resolve', (thread: vscode.CommentThread) => {
+            resolveThread(thread);
+            refresh();
+            queueSaveForThread(thread);
+        })
+    );
+
+    // --- Unresolve thread ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.unresolve', (thread: vscode.CommentThread) => {
+            unresolveThread(thread);
+            refresh();
+            queueSaveForThread(thread);
+        })
+    );
+
+    // --- Show MCP server info ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.showMcpInfo', () => showMcpInfo(context))
+    );
+
+    // --- Register the MCP server with a discovered client ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.registerMcpServer', () => showMcpConsumers())
+    );
+
+    // --- Show comment panel ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.showPanel', () => showCommentPanel())
+    );
+
+    // --- Submit all open to Copilot ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.submitAll', () => submitAll())
+    );
+
+    // --- Resolve all ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.resolveAll', () => {
+            let count = 0;
+            const touched: vscode.CommentThread[] = [];
+            for (const thread of threadMap.values()) {
+                if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
+            }
+            refresh();
+            for (const thread of touched) queueSaveForThread(thread);
+            if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''}.`);
+        })
+    );
+
+    // --- Delete all resolved ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.deleteResolved', async () => {
+            const resolved = [...threadMap.entries()].filter(([, t]) => t.contextValue === 'resolved');
+            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
+            const answer = await vscode.window.showWarningMessage(
+                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
+            );
+            if (answer !== 'Delete') return;
+            const uris: vscode.Uri[] = [];
+            for (const [id, thread] of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
+            refresh();
+            for (const uri of uris) queueSaveForUri(uri);
+        })
+    );
+
+    // --- Clear all ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.clearAll', async () => {
+            if (threadMap.size === 0 && driftedMap.size === 0) return;
+            const total = threadMap.size + driftedMap.size;
+            const answer = await vscode.window.showWarningMessage(
+                `Delete all ${total} review comment${total !== 1 ? 's' : ''}?`, { modal: true }, 'Delete All'
+            );
+            if (answer !== 'Delete All') return;
+            const uris: vscode.Uri[] = [];
+            for (const thread of threadMap.values()) { uris.push(thread.uri); thread.dispose(); }
+            for (const rec of driftedMap.values()) uris.push(vscode.Uri.parse(rec.uri));
+            threadMap.clear();
+            driftedMap.clear();
+            refresh();
+            for (const uri of uris) queueSaveForUri(uri);
+        })
+    );
+
+    // --- File-level batch: submit file ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.submitFile', async (fileKey: string) => {
+            const byFile = getThreadsByFile();
+            const entries = byFile.get(fileKey);
+            if (!entries) return;
+            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
+            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
+            const prompt = await buildPrompt(openThreads);
+            try {
+                await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
+            } catch {
+                await vscode.env.clipboard.writeText(prompt);
+                vscode.window.showInformationMessage('Prompt copied to clipboard.');
+            }
+        })
+    );
+
+    // --- File-level batch: resolve file ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.resolveFile', (fileKey: string) => {
+            const byFile = getThreadsByFile();
+            const entries = byFile.get(fileKey);
+            if (!entries) return;
+            let count = 0;
+            const touched: vscode.CommentThread[] = [];
+            for (const { thread } of entries) {
+                if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
+            }
+            refresh();
+            for (const thread of touched) queueSaveForThread(thread);
+            if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''} in ${fileKey}.`);
+        })
+    );
+
+    // --- File-level batch: delete resolved in file ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.deleteResolvedFile', async (fileKey: string) => {
+            const byFile = getThreadsByFile();
+            const entries = byFile.get(fileKey);
+            if (!entries) return;
+            const resolved = entries.filter(e => e.thread.contextValue === 'resolved');
+            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
+            const answer = await vscode.window.showWarningMessage(
+                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
+            );
+            if (answer !== 'Delete') return;
+            const uris: vscode.Uri[] = [];
+            for (const { id, thread } of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
+            refresh();
+            for (const uri of uris) queueSaveForUri(uri);
+        })
+    );
+
+    // --- Copy single thread to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyThread', async (thread: vscode.CommentThread) => {
+            const prompt = await buildPrompt([thread]);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage('Comment prompt copied to clipboard.');
+        })
+    );
+
+    // --- Copy all open to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyAll', async () => {
+            const openThreads = [...threadMap.values()].filter(t => t.contextValue !== 'resolved');
+            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments to copy.'); return; }
+            const prompt = await buildPrompt(openThreads);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage(`${openThreads.length} comment(s) copied to clipboard.`);
+        })
+    );
+
+    // --- Copy file comments to clipboard ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.copyFile', async (fileKey: string) => {
+            const byFile = getThreadsByFile();
+            const entries = byFile.get(fileKey);
+            if (!entries) return;
+            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
+            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
+            const prompt = await buildPrompt(openThreads);
+            await vscode.env.clipboard.writeText(prompt);
+            vscode.window.showInformationMessage(`${openThreads.length} comment(s) from ${fileKey} copied to clipboard.`);
+        })
+    );
+
+    // --- Register Copilot tools ---
+    registerTools(context);
+}
+
+/** Anchor a freshly created thread against the file's current content, if it can be read. */
+function computeAnchorForNewThread(thread: vscode.CommentThread): { anchorHash: string; anchorContext: string } | undefined {
+    try {
+        if (thread.uri.scheme !== 'file' || !fs.existsSync(thread.uri.fsPath)) return undefined;
+        const lines = fs.readFileSync(thread.uri.fsPath, 'utf-8').split(/\r\n|\n/);
+        const line = thread.range.start.line;
+        if (line < 0 || line >= lines.length) return undefined;
+        const context = anchorContextSnippet(lines, line, ANCHOR_CONTEXT_RADIUS);
+        return { anchorHash: hashAnchor(lines[line], context.split('\n')), anchorContext: context };
+    } catch {
+        return undefined;
+    }
+}
 
 // --------------- Register with an MCP consumer ---------------
 
@@ -779,354 +1787,10 @@ async function showMcpConsumers() {
     picker.show();
 }
 
-// --------------- Activation ---------------
-
-export function activate(context: vscode.ExtensionContext) {
-    extensionContext = context;
-    outputLog = vscode.window.createOutputChannel('Diff Review');
-    outputLog.appendLine('[Diff Review] Activating...');
-
-    const controller = vscode.comments.createCommentController('diffReview', 'Diff Review');
-    activeController = controller;
-    context.subscriptions.push(controller);
-
-    controller.commentingRangeProvider = {
-        provideCommentingRanges(document: vscode.TextDocument) {
-            return [new vscode.Range(0, 0, document.lineCount - 1, 0)];
-        }
-    };
-
-    controller.options = {
-        prompt: 'Add review comment',
-        placeHolder: 'Describe the change you want (e.g. "rename this variable", "add error handling")'
-    };
-
-    // --- Status bar (MUST be created before loadState/refresh) ---
-    statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-    statusBar.command = 'diffReview.showPanel';
-    statusBar.tooltip = 'Click to view review comments';
-    context.subscriptions.push(statusBar);
-
-    // --- Detect current branch and load state ---
-    currentBranchKey = getBranchKey();
-    outputLog.appendLine(`[Diff Review] Current branch key: ${currentBranchKey}`);
-
-    // Migrate old unscoped state if it exists
-    const oldData = extensionContext.workspaceState.get<SerializedState>('diffReview.state');
-    if (oldData && oldData.threads && oldData.threads.length > 0) {
-        const scopedData = extensionContext.workspaceState.get<SerializedState>(stateKey());
-        if (!scopedData || !scopedData.threads || scopedData.threads.length === 0) {
-            extensionContext.workspaceState.update(stateKey(), oldData);
-            outputLog.appendLine(`[Diff Review] Migrated ${oldData.threads.length} threads from unscoped to ${currentBranchKey}`);
-        }
-        extensionContext.workspaceState.update('diffReview.state', undefined);
-    }
-
-    try {
-        loadStateFromKey(controller, currentBranchKey);
-        outputLog.appendLine(`[Diff Review] Loaded ${threadMap.size} persisted threads for ${currentBranchKey}`);
-    } catch (e: any) {
-        outputLog.appendLine(`[Diff Review] Error loading state: ${e.message}`);
-    }
-    refresh();
-
-    // --- Line tracking ---
-    setupLineTracking(context);
-
-    // --- Branch watcher ---
-    setupBranchWatcher(context, controller);
-
-    // --- MCP launcher ---
-    deployMcpLauncher(context);
-
-    // --- IPC Server ---
-    startIpcServer(context).then(port => {
-        outputLog.appendLine(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
-    }).catch(err => {
-        outputLog.appendLine(`[Diff Review] Failed to start IPC server: ${err}`);
-    });
-
-    // --- Create comment (first comment in a new thread) ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.createNote', (reply: vscode.CommentReply) => {
-            const thread = reply.thread;
-            const comment = new ReviewComment(reply.text, 'user');
-            thread.comments = [comment];
-            thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-            thread.canReply = true;
-            thread.label = 'Open';
-            thread.contextValue = 'open';
-            trackThread(thread);
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Reply (additional comments in existing thread) ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.reply', (reply: vscode.CommentReply) => {
-            const thread = reply.thread;
-            const comment = new ReviewComment(reply.text, 'user');
-            thread.comments = [...thread.comments, comment];
-            saveState();
-        })
-    );
-
-    // --- Edit comment ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.editComment', (comment: ReviewComment) => {
-            const thread = findThreadForComment(comment.id);
-            if (!thread) return;
-            thread.comments = thread.comments.map(c => {
-                if ((c as ReviewComment).id === comment.id) {
-                    const edited = c as ReviewComment;
-                    edited.mode = vscode.CommentMode.Editing;
-                    return edited;
-                }
-                return c;
-            });
-        })
-    );
-
-    // --- Save edited comment ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.saveEdit', (comment: ReviewComment) => {
-            const thread = findThreadForComment(comment.id);
-            if (!thread) return;
-            thread.comments = thread.comments.map(c => {
-                if ((c as ReviewComment).id === comment.id) {
-                    const saved = c as ReviewComment;
-                    saved.mode = vscode.CommentMode.Preview;
-                    return saved;
-                }
-                return c;
-            });
-            saveState();
-        })
-    );
-
-    // --- Cancel edit ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.cancelEdit', (comment: ReviewComment) => {
-            const thread = findThreadForComment(comment.id);
-            if (!thread) return;
-            thread.comments = thread.comments.map(c => {
-                if ((c as ReviewComment).id === comment.id) {
-                    const cancelled = c as ReviewComment;
-                    cancelled.mode = vscode.CommentMode.Preview;
-                    return cancelled;
-                }
-                return c;
-            });
-        })
-    );
-
-    // --- Delete individual comment ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.deleteNote', (comment: ReviewComment) => {
-            const thread = findThreadForComment(comment.id);
-            if (!thread) return;
-            if (thread.comments.length <= 1) {
-                untrackThread(thread);
-                thread.dispose();
-            } else {
-                thread.comments = thread.comments.filter(
-                    c => (c as ReviewComment).id !== comment.id
-                );
-            }
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Send single thread to Copilot ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.sendThread', async (thread: vscode.CommentThread) => {
-            const prompt = await buildPrompt([thread]);
-            try {
-                await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
-            } catch {
-                await vscode.env.clipboard.writeText(prompt);
-                vscode.window.showInformationMessage('Prompt copied to clipboard.');
-            }
-        })
-    );
-
-    // --- Resolve thread ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.resolve', (thread: vscode.CommentThread) => {
-            resolveThread(thread);
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Unresolve thread ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.unresolve', (thread: vscode.CommentThread) => {
-            unresolveThread(thread);
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Show MCP server info ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.showMcpInfo', () => showMcpInfo(context))
-    );
-
-    // --- Register the MCP server with a discovered client ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.registerMcpServer', () => showMcpConsumers())
-    );
-
-    // --- Show comment panel ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.showPanel', () => showCommentPanel())
-    );
-
-    // --- Submit all open to Copilot ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.submitAll', () => submitAll())
-    );
-
-    // --- Resolve all ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.resolveAll', () => {
-            let count = 0;
-            for (const thread of threadMap.values()) {
-                if (thread.contextValue !== 'resolved') { resolveThread(thread); count++; }
-            }
-            refresh();
-            saveState();
-            if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''}.`);
-        })
-    );
-
-    // --- Delete all resolved ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.deleteResolved', async () => {
-            const resolved = [...threadMap.entries()].filter(([, t]) => t.contextValue === 'resolved');
-            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
-            const answer = await vscode.window.showWarningMessage(
-                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
-            );
-            if (answer !== 'Delete') return;
-            for (const [id, thread] of resolved) { threadMap.delete(id); thread.dispose(); }
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Clear all ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.clearAll', async () => {
-            if (threadMap.size === 0) return;
-            const answer = await vscode.window.showWarningMessage(
-                `Delete all ${threadMap.size} review comment${threadMap.size !== 1 ? 's' : ''}?`, { modal: true }, 'Delete All'
-            );
-            if (answer !== 'Delete All') return;
-            for (const thread of threadMap.values()) thread.dispose();
-            threadMap.clear();
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- File-level batch: submit file ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.submitFile', async (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
-            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
-            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
-            const prompt = await buildPrompt(openThreads);
-            try {
-                await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
-            } catch {
-                await vscode.env.clipboard.writeText(prompt);
-                vscode.window.showInformationMessage('Prompt copied to clipboard.');
-            }
-        })
-    );
-
-    // --- File-level batch: resolve file ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.resolveFile', (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
-            let count = 0;
-            for (const { thread } of entries) {
-                if (thread.contextValue !== 'resolved') { resolveThread(thread); count++; }
-            }
-            refresh();
-            saveState();
-            if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''} in ${fileKey}.`);
-        })
-    );
-
-    // --- File-level batch: delete resolved in file ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.deleteResolvedFile', async (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
-            const resolved = entries.filter(e => e.thread.contextValue === 'resolved');
-            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
-            const answer = await vscode.window.showWarningMessage(
-                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
-            );
-            if (answer !== 'Delete') return;
-            for (const { id, thread } of resolved) { threadMap.delete(id); thread.dispose(); }
-            refresh();
-            saveState();
-        })
-    );
-
-    // --- Copy single thread to clipboard ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.copyThread', async (thread: vscode.CommentThread) => {
-            const prompt = await buildPrompt([thread]);
-            await vscode.env.clipboard.writeText(prompt);
-            vscode.window.showInformationMessage('Comment prompt copied to clipboard.');
-        })
-    );
-
-    // --- Copy all open to clipboard ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.copyAll', async () => {
-            const openThreads = [...threadMap.values()].filter(t => t.contextValue !== 'resolved');
-            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments to copy.'); return; }
-            const prompt = await buildPrompt(openThreads);
-            await vscode.env.clipboard.writeText(prompt);
-            vscode.window.showInformationMessage(`${openThreads.length} comment(s) copied to clipboard.`);
-        })
-    );
-
-    // --- Copy file comments to clipboard ---
-    context.subscriptions.push(
-        vscode.commands.registerCommand('diffReview.copyFile', async (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
-            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
-            if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
-            const prompt = await buildPrompt(openThreads);
-            await vscode.env.clipboard.writeText(prompt);
-            vscode.window.showInformationMessage(`${openThreads.length} comment(s) from ${fileKey} copied to clipboard.`);
-        })
-    );
-
-    // --- Register Copilot tools ---
-    registerTools(context);
-}
-
 // --------------- Interactive QuickPick Panel ---------------
 
 async function showCommentPanel() {
-    if (threadMap.size === 0) {
+    if (threadMap.size === 0 && driftedMap.size === 0) {
         vscode.window.showInformationMessage('No review comments.');
         return;
     }
@@ -1135,12 +1799,14 @@ async function showCommentPanel() {
         action?: string;
         threadId?: number;
         fileKey?: string;
+        driftedId?: number;
     }
 
     const qp = vscode.window.createQuickPick<ActionItem>();
     const openCount = [...threadMap.values()].filter(t => t.contextValue !== 'resolved').length;
     const resolvedCount = threadMap.size - openCount;
-    qp.title = `Review Comments (${openCount} open, ${resolvedCount} resolved)`;
+    const driftedCount = driftedMap.size;
+    qp.title = `Review Comments (${openCount} open, ${resolvedCount} resolved${driftedCount > 0 ? `, ${driftedCount} drifted` : ''})`;
     qp.placeholder = 'Type to search comments… Select an action or comment.';
     qp.matchOnDescription = true;
 
@@ -1205,6 +1871,31 @@ async function showCommentPanel() {
             }
         }
 
+        // Needs re-attaching (F4): drifted threads have left the gutter, so
+        // they only ever appear here, grouped by their last-known file.
+        if (driftedMap.size > 0) {
+            const byDriftedFile = getDriftedByFile();
+            const dl = filter.toLowerCase();
+            items.push({ label: `🧩 Needs re-attaching (${driftedMap.size})`, kind: vscode.QuickPickItemKind.Separator });
+            for (const [file, recs] of byDriftedFile) {
+                const matching = dl
+                    ? recs.filter(r => file.toLowerCase().includes(dl) || r.comments.some(c => c.body.toLowerCase().includes(dl)))
+                    : recs;
+                if (matching.length === 0) continue;
+                if (matching.length > 1) {
+                    items.push({ label: `  $(sync) Re-attach all in ${file}…`, description: `${matching.length} drifted`, action: 'reattachAllInFile', fileKey: file });
+                }
+                for (const rec of matching) {
+                    items.push({
+                        label: `    🧩 (was L${rec.lastKnownLine + 1}): ${driftedPreview(rec)}`,
+                        description: file,
+                        driftedId: rec.id,
+                        action: 'driftedAction',
+                    });
+                }
+            }
+        }
+
         return items;
     }
 
@@ -1246,6 +1937,12 @@ async function showCommentPanel() {
                 break;
             case 'commentAction':
                 if (pick.threadId !== undefined) await showCommentActions(pick.threadId);
+                break;
+            case 'driftedAction':
+                if (pick.driftedId !== undefined) await showDriftedActions(pick.driftedId);
+                break;
+            case 'reattachAllInFile':
+                if (pick.fileKey) await reattachAllInFile(pick.fileKey);
                 break;
         }
     });
@@ -1300,21 +1997,191 @@ async function showCommentActions(threadId: number) {
         case 'resolve':
             resolveThread(thread);
             refresh();
+            queueSaveForThread(thread);
             break;
         case 'unresolve':
             unresolveThread(thread);
             refresh();
+            queueSaveForThread(thread);
             break;
         case 'delete': {
             const answer = await vscode.window.showWarningMessage(
                 'Delete this comment thread?', { modal: true }, 'Delete'
             );
             if (answer !== 'Delete') break;
+            const uri = thread.uri;
             threadMap.delete(threadId);
             thread.dispose();
             refresh();
+            queueSaveForUri(uri);
             break;
         }
+    }
+}
+
+// --------------- Drifted Comment Actions (F4) ---------------
+
+async function showDriftedActions(id: number) {
+    const rec = driftedMap.get(id);
+    if (!rec) return;
+
+    const uri = vscode.Uri.parse(rec.uri);
+    const rel = vscode.workspace.asRelativePath(uri);
+    const preview = driftedPreview(rec);
+    const fileExists = uri.scheme === 'file' && fs.existsSync(uri.fsPath);
+
+    interface ActionItem extends vscode.QuickPickItem { action: string; }
+
+    const items: ActionItem[] = [
+        { label: '$(diff) Show Original Context', description: `${rel} (was L${rec.lastKnownLine + 1})`, action: 'showContext' },
+        ...(fileExists ? [
+            { label: '$(target) Re-attach…', description: 'Place your cursor on the line, then confirm', action: 'reattach' },
+            { label: '$(search) Search Again', description: 'Re-scan the file for this anchor', action: 'searchAgain' },
+        ] : []),
+        { label: '$(note) Keep as File Note', description: 'No specific line — attach to the top of the file', action: 'fileNote' },
+        { label: rec.status === 'resolved' ? '$(debug-restart) Reopen' : '$(check) Resolve', action: 'toggleResolve' },
+        { label: '$(trash) Delete', action: 'delete' },
+    ];
+
+    const pick = await vscode.window.showQuickPick(items, {
+        title: `🧩 ${rel}: ${preview}`,
+        placeHolder: 'This comment left the gutter — its original location was not found',
+    });
+    if (!pick) return;
+
+    switch (pick.action) {
+        case 'showContext':
+            vscode.window.showInformationMessage(
+                rec.anchorContext ? `Original context:\n${rec.anchorContext}` : 'No stored context for this comment.',
+                { modal: true }
+            );
+            break;
+        case 'reattach':
+            await reattachDrifted(id);
+            break;
+        case 'searchAgain':
+            await searchAgainForDrifted(id);
+            break;
+        case 'fileNote':
+            await keepDriftedAsFileNote(id);
+            break;
+        case 'toggleResolve':
+            rec.status = rec.status === 'resolved' ? 'open' : 'resolved';
+            rec.updatedAt = new Date().toISOString();
+            queueSaveForUri(uri);
+            refresh();
+            break;
+        case 'delete': {
+            const answer = await vscode.window.showWarningMessage('Delete this drifted comment?', { modal: true }, 'Delete');
+            if (answer !== 'Delete') break;
+            driftedMap.delete(id);
+            queueSaveForUri(uri);
+            refresh();
+            break;
+        }
+    }
+}
+
+/** Re-run the drift ladder against the file's current content, in case the code came back (a rebase finishing, a branch switched back). */
+async function searchAgainForDrifted(id: number) {
+    const rec = driftedMap.get(id);
+    if (!rec) return;
+    const uri = vscode.Uri.parse(rec.uri);
+    if (uri.scheme !== 'file' || !fs.existsSync(uri.fsPath)) {
+        vscode.window.showInformationMessage('That file does not exist any more.');
+        return;
+    }
+    // Without a stored anchorHash (this record predates anchoring, or was
+    // hand-created) there is nothing to search for — only an exact re-attach applies.
+    const doc = await vscode.workspace.openTextDocument(uri);
+    vscode.window.showInformationMessage('Diff Review: no stored anchor to search for — use Re-attach instead to pick the line by hand.');
+    void doc;
+}
+
+/** Opens the file and lets the user confirm the current cursor position as the new anchor. */
+async function reattachDrifted(id: number) {
+    const rec = driftedMap.get(id);
+    if (!rec) return;
+    const uri = vscode.Uri.parse(rec.uri);
+    if (uri.scheme !== 'file' || !fs.existsSync(uri.fsPath)) {
+        vscode.window.showWarningMessage('Diff Review: that file no longer exists.');
+        return;
+    }
+
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(doc);
+    const choice = await vscode.window.showInformationMessage(
+        'Place your cursor on the line this comment refers to, then confirm.',
+        'Confirm', 'Cancel'
+    );
+    if (choice !== 'Confirm') return;
+
+    const active = vscode.window.activeTextEditor;
+    if (!active || active.document.uri.toString() !== uri.toString()) {
+        vscode.window.showWarningMessage('Diff Review: the active editor changed — try again from the same file.');
+        return;
+    }
+    const line = active.selection.active.line;
+    finishReattach(id, uri, line);
+    void editor;
+}
+
+function finishReattach(id: number, uri: vscode.Uri, line: number) {
+    const rec = driftedMap.get(id);
+    if (!rec || !activeController) return;
+
+    let anchor: { anchorHash: string; anchorContext: string } | undefined;
+    try {
+        const lines = fs.readFileSync(uri.fsPath, 'utf-8').split(/\r\n|\n/);
+        if (line >= 0 && line < lines.length) {
+            const context = anchorContextSnippet(lines, line, ANCHOR_CONTEXT_RADIUS);
+            anchor = { anchorHash: hashAnchor(lines[line], context.split('\n')), anchorContext: context };
+        }
+    } catch { /* best effort */ }
+
+    const range = new vscode.Range(line, 0, line, 0);
+    const thread = activeController.createCommentThread(uri, range, []);
+    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
+    thread.canReply = true;
+    if (rec.status === 'resolved') {
+        thread.label = '✅ Resolved'; thread.contextValue = 'resolved';
+        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    } else {
+        thread.label = 'Open'; thread.contextValue = 'open';
+        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    }
+    trackThread(thread, id, anchor);
+    driftedMap.delete(id);
+    refresh();
+    queueSaveForThread(thread);
+    vscode.window.showInformationMessage('Diff Review: comment re-attached.');
+}
+
+/** Accept a drifted comment as file-level — anchored at line 0 with no further drift checking. */
+async function keepDriftedAsFileNote(id: number) {
+    const rec = driftedMap.get(id);
+    if (!rec || !activeController) return;
+    const uri = vscode.Uri.parse(rec.uri);
+    const range = new vscode.Range(0, 0, 0, 0);
+    const thread = activeController.createCommentThread(uri, range, []);
+    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
+    thread.canReply = true;
+    thread.label = rec.status === 'resolved' ? '✅ Resolved (file note)' : 'Open (file note)';
+    thread.contextValue = rec.status === 'resolved' ? 'resolved' : 'open';
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    trackThread(thread, id); // no anchor — this thread is intentionally exempt from future drift checks
+    driftedMap.delete(id);
+    refresh();
+    queueSaveForThread(thread);
+}
+
+async function reattachAllInFile(fileKey: string) {
+    const byDriftedFile = getDriftedByFile();
+    const recs = byDriftedFile.get(fileKey);
+    if (!recs || recs.length === 0) return;
+    for (const rec of [...recs]) {
+        if (!driftedMap.has(rec.id)) continue; // handled by a previous iteration (e.g. deleted)
+        await showDriftedActions(rec.id);
     }
 }
 
@@ -1386,10 +2253,6 @@ async function getFileDiffHunks(uri: vscode.Uri): Promise<DiffHunk[]> {
     } catch {
         return [];
     }
-}
-
-function escapeRegex(s: string): string {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function findRelevantHunk(hunks: DiffHunk[], targetLine: number): string | undefined {
@@ -1543,7 +2406,7 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
         _options: vscode.LanguageModelToolInvocationOptions<{}>,
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        if (threadMap.size === 0) {
+        if (threadMap.size === 0 && driftedMap.size === 0) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('No review comments.')
             ]);
@@ -1560,6 +2423,11 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
             }).join('\n');
             lines.push(`#${id} | ${rel}:${line} | ${status}\n${comments}`);
         }
+        for (const [id, rec] of driftedMap) {
+            const rel = vscode.workspace.asRelativePath(vscode.Uri.parse(rec.uri));
+            const comments = rec.comments.map(c => `  [${c.role}] ${c.body}`).join('\n');
+            lines.push(`#${id} | DRIFTED (was ${rel}:${rec.lastKnownLine + 1}) | ${rec.status.toUpperCase()}\n${comments}`);
+        }
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(lines.join('\n\n'))
         ]);
@@ -1574,18 +2442,28 @@ class ReplyToCommentTool implements vscode.LanguageModelTool<ReplyParams> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId, text } = options.input;
-        const thread = threadMap.get(commentId);
-        if (!thread) {
+        const found = findThreadOrDrifted(commentId);
+        if (!found) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        const reply = new ReviewComment(text, 'agent');
-        thread.comments = [...thread.comments, reply];
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-        saveState();
+        if (found.kind === 'live') {
+            const reply = new ReviewComment(text, 'agent');
+            found.thread.comments = [...found.thread.comments, reply];
+            found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+            touchThread(found.thread);
+            queueSaveForThread(found.thread);
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent.`)
+            ]);
+        }
+        const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
+        found.rec.comments.push(comment);
+        found.rec.updatedAt = comment.timestamp;
+        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
         return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent.`)
+            new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent. Note: this thread is DRIFTED — its original location was not found, so the reply may no longer be actionable at a specific line.`)
         ]);
     }
 }
@@ -1598,17 +2476,21 @@ class ResolveCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId } = options.input;
-        const thread = threadMap.get(commentId);
-        if (!thread) {
+        const found = findThreadOrDrifted(commentId);
+        if (!found) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        thread.label = '✅ Resolved';
-        thread.contextValue = 'resolved';
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
-        refresh();
-        saveState();
+        if (found.kind === 'live') {
+            resolveThread(found.thread);
+            refresh();
+            queueSaveForThread(found.thread);
+        } else {
+            found.rec.status = 'resolved';
+            found.rec.updatedAt = new Date().toISOString();
+            queueSaveForUri(vscode.Uri.parse(found.rec.uri));
+        }
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} resolved.`)
         ]);
@@ -1621,20 +2503,29 @@ class DeleteCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId } = options.input;
-        const thread = threadMap.get(commentId);
-        if (!thread) {
+        const found = findThreadOrDrifted(commentId);
+        if (!found) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        threadMap.delete(commentId);
-        thread.dispose();
-        refresh();
-        saveState();
+        if (found.kind === 'live') {
+            threadMap.delete(commentId);
+            const uri = found.thread.uri;
+            found.thread.dispose();
+            refresh();
+            queueSaveForUri(uri);
+        } else {
+            driftedMap.delete(commentId);
+            queueSaveForUri(vscode.Uri.parse(found.rec.uri));
+        }
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} deleted.`)
         ]);
     }
 }
 
-export function deactivate() {}
+export function deactivate(): Thenable<void> {
+    for (const folder of folders) folder.watcher?.dispose();
+    return flushAllSaves();
+}
