@@ -11,6 +11,11 @@
  * Pure: no `vscode` import, so it is requirable under plain `node --test`.
  * See test/slash-commands.test.js.
  */
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { readText, backup } from './file-write';
+import { VSCODE_APPS, userDataRoot, parseProfiles } from './vscode-profiles';
 
 export type CommandId = 'perform' | 'address';
 export type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
@@ -193,12 +198,6 @@ export function renderBody(kind: CommandKind, command: CommandId): string {
 
 // --------------- Discovery and status ---------------
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { readText } from './file-write';
-import { VSCODE_APPS, userDataRoot, parseProfiles } from './vscode-profiles';
-
 export type Status = 'current' | 'stale' | 'missing';
 
 export interface CommandFile {
@@ -324,8 +323,6 @@ export function discoverSlashCommands(env: DiscoveryEnv = {}): SlashCommandTarge
 }
 
 // --------------- Clipboard rendering and writers ---------------
-
-import { backup } from './file-write';
 
 /** What lands on the clipboard: the body, plus where to save it. */
 export function renderClipboard(target: SlashCommandTarget, command: CommandId): string {
