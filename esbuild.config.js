@@ -47,6 +47,7 @@ const targets = {
     'comment-store': { ...shared, entryPoints: ['src/comment-store.ts'], outfile: 'out/comment-store.js', target: 'node18' },
     'path-util': { ...shared, entryPoints: ['src/path-util.ts'], outfile: 'out/path-util.js', target: 'node18' },
     'file-write': { ...shared, entryPoints: ['src/file-write.ts'], outfile: 'out/file-write.js', target: 'node18' },
+    'vscode-profiles': { ...shared, entryPoints: ['src/vscode-profiles.ts'], outfile: 'out/vscode-profiles.js', target: 'node18' },
 };
 
 module.exports = { shared, targets };
