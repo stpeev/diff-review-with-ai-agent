@@ -271,32 +271,34 @@ export interface DiscoveryEnv {
  * Every agent on this machine with a slash-command directory, and whether
  * our two commands are installed and current in it.
  *
- * A row exists for Claude Code / Codex / Gemini only when their own command
- * directory exists — that is the only evidence we have those agents are
- * installed at all. For the VS Code family, a row exists when the app's or
- * profile's own directory exists (matching `mcp-consumers.ts`'s
- * `discoverConsumers`), since `storage.json` or the app root already proves
- * installation independently of whether `prompts/` has been used yet.
+ * A row exists for Claude Code / Codex / Gemini when the agent's *home*
+ * directory exists — `~/.codex` proves Codex is installed, the same evidence
+ * `mcp-consumers.ts`'s `discoverConsumers` already trusts. Gating on the
+ * command directory instead would hide every agent whose owner has never
+ * written a custom prompt, which is precisely who this installer serves;
+ * `install` creates the directory when it writes. For the VS Code family a row
+ * exists when the app's or profile's own directory exists, for the same reason.
+ *
+ * Discovery itself stays read-only: it never creates a directory it reports.
  */
 export function discoverSlashCommands(env: DiscoveryEnv = {}): SlashCommandTarget[] {
     const home = env.home ?? os.homedir();
     const platform = env.platform ?? process.platform;
     const targets: SlashCommandTarget[] = [];
 
-    const claudeDir = path.join(home, '.claude', 'commands');
-    if (fs.existsSync(claudeDir)) {
-        targets.push(buildTarget('claude', 'Claude Code', 'claude-md', claudeDir));
+    const claudeHome = path.join(home, '.claude');
+    if (fs.existsSync(claudeHome)) {
+        targets.push(buildTarget('claude', 'Claude Code', 'claude-md', path.join(claudeHome, 'commands')));
     }
 
     const codexHome = env.codexHome ?? process.env.CODEX_HOME ?? path.join(home, '.codex');
-    const codexDir = path.join(codexHome, 'prompts');
-    if (fs.existsSync(codexDir)) {
-        targets.push(buildTarget('codex', 'Codex CLI', 'codex-md', codexDir));
+    if (fs.existsSync(codexHome)) {
+        targets.push(buildTarget('codex', 'Codex CLI', 'codex-md', path.join(codexHome, 'prompts')));
     }
 
-    const geminiDir = path.join(home, '.gemini', 'commands');
-    if (fs.existsSync(geminiDir)) {
-        targets.push(buildTarget('gemini', 'Gemini CLI', 'gemini-toml', geminiDir));
+    const geminiHome = path.join(home, '.gemini');
+    if (fs.existsSync(geminiHome)) {
+        targets.push(buildTarget('gemini', 'Gemini CLI', 'gemini-toml', path.join(geminiHome, 'commands')));
     }
 
     const vscodeIds = new Set(['vscode', 'vscode-insiders', 'vscodium']);

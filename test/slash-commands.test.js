@@ -138,6 +138,45 @@ test('discoverSlashCommands: Gemini CLI row uses .toml filenames', () => {
     assert.ok(gemini.files.every(f => f.filePath.endsWith('.toml')));
 });
 
+// An agent's home directory is proof enough that the agent is installed. Gating
+// on the command directory instead hid Codex from anyone who had never written a
+// custom prompt — exactly the user the installer is for. `install` creates the
+// directory when it writes, and `mcp-consumers.ts` already trusts `~/.codex`.
+test('discoverSlashCommands: Claude Code row appears from ~/.claude alone', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const claude = targets.find(t => t.id === 'claude');
+    assert.ok(claude, 'expected a claude row from the home dir alone');
+    assert.strictEqual(claude.dirPath, path.join(home, '.claude', 'commands'));
+    assert.strictEqual(claude.status, 'missing');
+    assert.ok(claude.writable);
+});
+
+test('discoverSlashCommands: Codex CLI row appears from ~/.codex alone', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const codex = targets.find(t => t.id === 'codex');
+    assert.ok(codex, 'expected a codex row from the home dir alone');
+    assert.strictEqual(codex.dirPath, path.join(home, '.codex', 'prompts'));
+    assert.strictEqual(codex.status, 'missing');
+});
+
+test('discoverSlashCommands: Gemini CLI row appears from ~/.gemini alone', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    assert.ok(targets.find(t => t.id === 'gemini'), 'expected a gemini row from the home dir alone');
+});
+
+test('discoverSlashCommands: discovery never creates the command directory', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    const codex = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'codex');
+    assert.ok(!fs.existsSync(codex.dirPath), 'inspecting must stay read-only');
+});
+
 test('discoverSlashCommands: a fully current file is status current and writable', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');

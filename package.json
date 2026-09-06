@@ -3,7 +3,12 @@
   "displayName": "Diff Review with AI Agent",
   "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot, Claude Code, or any AI agent, with git diff context",
   "version": "0.4.0",
-  "publisher": "JinqiShen / Stanimir Peev",
+  "publisher": "JinqiShen",
+  "contributors": [
+    {
+      "name": "Stanimir Peev"
+    }
+  ],
   "icon": "icon.png",
   "repository": {
     "type": "git",
