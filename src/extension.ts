@@ -6,6 +6,10 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { LAUNCHER_FILE, POINTER_FILE, STATE_DIR, Resolution, fromEnv, fromPointerFile, resolveServer } from './mcp-resolve';
 import { McpConsumerTarget, discoverConsumers, register, renderSnippet, snippetDestination } from './mcp-consumers';
+import {
+    SlashCommandTarget, CommandId,
+    discoverSlashCommands, renderClipboard, install, INVOCATION,
+} from './slash-commands';
 import { isAncestor, resolveWithinRoot } from './path-util';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
@@ -1531,6 +1535,11 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.registerMcpServer', () => showMcpConsumers())
     );
 
+    // --- Install the agent slash commands ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.installAgentCommands', () => showSlashCommandTargets())
+    );
+
     // --- Show comment panel ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.showPanel', () => showCommentPanel())
@@ -1860,6 +1869,157 @@ async function showMcpConsumers() {
         const picked = picker.selectedItems[0];
         picker.hide();
         if (picked) { await registerWithConsumer(picked.target); }
+    });
+
+    picker.onDidHide(() => picker.dispose());
+    picker.show();
+}
+
+// --------------- Install agent slash commands ---------------
+
+function slashRowIcon(target: SlashCommandTarget): string {
+    if (target.files.some(f => f.status === 'stale')) return '$(warning)';
+    if (target.status === 'current') return '$(check)';
+    if (target.status === 'missing' && target.files.every(f => f.status === 'missing')) return '$(circle-outline)';
+    return '$(warning)'; // one current, one missing
+}
+
+function slashRowLabel(target: SlashCommandTarget): string {
+    const manual = target.writable ? '' : ' (manual)';
+    if (target.files.some(f => f.status === 'stale')) return `installed — older version${manual}`;
+    if (target.status === 'current') return `installed${manual}`;
+    const installedCount = target.files.filter(f => f.status === 'current').length;
+    if (installedCount > 0) return `${installedCount} of ${target.files.length} installed${manual}`;
+    return `not installed${manual}`;
+}
+
+async function copySlashCommand(target: SlashCommandTarget, command: CommandId) {
+    await vscode.env.clipboard.writeText(renderClipboard(target, command));
+    vscode.window.showInformationMessage(
+        `Diff Review: copied ${INVOCATION[command]} for ${target.label} to the clipboard.`);
+}
+
+async function pickAndCopySlashCommands(target: SlashCommandTarget) {
+    const choice = await vscode.window.showQuickPick(
+        [
+            { label: INVOCATION.perform, command: 'perform' as CommandId },
+            { label: INVOCATION.address, command: 'address' as CommandId },
+            { label: 'Both', command: undefined },
+        ],
+        { title: `Copy which command for ${target.label}?` },
+    );
+    if (!choice) return;
+
+    if (choice.command) {
+        await copySlashCommand(target, choice.command);
+        return;
+    }
+    const text = (['perform', 'address'] as CommandId[]).map(c => renderClipboard(target, c)).join('\n\n');
+    await vscode.env.clipboard.writeText(text);
+    vscode.window.showInformationMessage(
+        `Diff Review: copied both commands for ${target.label} to the clipboard.`);
+}
+
+/**
+ * Confirm, then write both files. Every failure path ends at the clipboard
+ * rather than a dead end, so a file we cannot write is still one the user
+ * can paste in by hand.
+ */
+async function installSlashCommands(target: SlashCommandTarget) {
+    if (target.status === 'current') {
+        vscode.window.showInformationMessage(
+            `Diff Review: ${target.label} already has ${INVOCATION.perform} and ${INVOCATION.address}.`);
+        return;
+    }
+
+    if (!target.writable) {
+        await pickAndCopySlashCommands(target);
+        return;
+    }
+
+    const skipped = target.files.filter(f => !f.writable);
+    const toWrite = target.files.filter(f => f.writable && f.status !== 'current');
+    const skippedNote = skipped.length > 0
+        ? `\n\nSkipping ${skipped.map(f => f.invocation).join(', ')} — not written by Diff Review.`
+        : '';
+    const before = toWrite.some(f => f.status === 'stale')
+        ? '\n\nOverwriting an older version of what we wrote before.'
+        : '';
+
+    const answer = await vscode.window.showInformationMessage(
+        `Install ${toWrite.map(f => f.invocation).join(' and ')} for ${target.label}?`,
+        {
+            modal: true,
+            detail: `${toWrite.map(f => f.filePath).join('\n')}${before}${skippedNote}`,
+        },
+        'Write', 'Copy',
+    );
+
+    if (answer === 'Copy') { await pickAndCopySlashCommands(target); return; }
+    if (answer !== 'Write') return;
+
+    const outcome = install(target);
+    if (outcome.written.length > 0) {
+        const backups = outcome.written.filter(w => w.backup);
+        vscode.window.showInformationMessage(
+            `Diff Review: installed ${outcome.written.map(w => w.filePath).join(', ')} for ${target.label}.` +
+            (backups.length > 0 ? ` Previous version(s) saved to ${backups.map(w => homeShort(w.backup!)).join(', ')}.` : ''));
+    }
+    if (outcome.errors.length > 0) {
+        outputLog.appendLine(
+            `[Diff Review] installSlashCommands failed for ${target.id}: ${outcome.errors.map(e => e.message).join('; ')}`);
+        vscode.window.showWarningMessage(
+            `Diff Review: could not write ${outcome.errors.map(e => homeShort(e.filePath)).join(', ')} ` +
+            `(${outcome.errors.map(e => e.message).join('; ')}). Copying those to the clipboard instead.`);
+        for (const failed of outcome.errors) {
+            await copySlashCommand(target, failed.command);
+        }
+    }
+}
+
+async function showSlashCommandTargets() {
+    const revealButton: vscode.QuickInputButton = {
+        iconPath: new vscode.ThemeIcon('folder-opened'),
+        tooltip: 'Reveal in file explorer',
+    };
+    const copyButton: vscode.QuickInputButton = {
+        iconPath: new vscode.ThemeIcon('clippy'),
+        tooltip: 'Copy the commands instead of writing them',
+    };
+
+    const targets = discoverSlashCommands();
+    if (targets.length === 0) {
+        vscode.window.showInformationMessage('Diff Review: no agent slash-command directories found on this machine.');
+        return;
+    }
+
+    const items = targets.map(target => ({
+        label: `${slashRowIcon(target)} ${target.label}`,
+        description: slashRowLabel(target),
+        detail: homeShort(target.dirPath),
+        buttons: fs.existsSync(target.dirPath) ? [copyButton, revealButton] : [copyButton],
+        target,
+    }));
+
+    const picker = vscode.window.createQuickPick<typeof items[number]>();
+    picker.title = 'Diff Review — Install Agent Slash Commands';
+    picker.placeholder = 'Select an agent to install /perform-diff-review and /address-diff-review';
+    picker.matchOnDetail = true;
+    picker.items = items;
+
+    picker.onDidTriggerItemButton(async event => {
+        if (event.button === copyButton) {
+            picker.hide();
+            await pickAndCopySlashCommands(event.item.target);
+            return;
+        }
+        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(event.item.target.dirPath));
+    });
+
+    picker.onDidAccept(async () => {
+        const picked = picker.selectedItems[0];
+        picker.hide();
+        if (picked) { await installSlashCommands(picked.target); }
     });
 
     picker.onDidHide(() => picker.dispose());
