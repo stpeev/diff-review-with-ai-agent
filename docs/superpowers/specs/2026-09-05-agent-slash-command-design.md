@@ -2,6 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-09-05
+**Updated:** 2026-09-06 — second command (`/perform-diff-review`), module split
 
 ## Problem
 
@@ -12,15 +13,31 @@ and resolve — but nothing tells the agent *when* to pull, or what to do with w
 it finds. The user has to type that instruction every time, and every user
 invents their own wording.
 
+The same gap exists on the write side. `createDiffComment` lets an agent leave
+threads in the gutter, but nothing tells it to review a branch and do so.
+
 Every coding agent worth targeting already solves this with user-defined slash
 commands. None of them get one from us.
 
 ## Goal
 
 One command that lists every agent on the machine with a slash-command
-directory, says whether `/address-diff-review-comments` is installed and current,
-and installs it on selection — with a copyable prompt body as the
+directory, says whether **our pair of commands** is installed and current, and
+installs them on selection — with a copyable prompt body as the
 always-available fallback, for agents with no command directory at all.
+
+The pair is the loop, and neither half is much use alone:
+
+| Command | Direction | MCP tools |
+|---|---|---|
+| `/perform-diff-review` | agent → editor | `listDiffComments`, `createDiffComment` |
+| `/address-diff-review` | editor → agent | `listDiffComments`, `replyToDiffComment`, `resolveDiffComment` |
+
+`/perform-diff-review` reviews the branch and leaves its findings as gutter
+threads the user can read, edit, delete or accept in the editor.
+`/address-diff-review` — run afterwards, ideally in a fresh context — works
+those threads in the code. The handoff through the editor is the point: the
+human sits between the two halves.
 
 The shape deliberately mirrors `Diff Review: Register MCP Server with a Coding
 Agent` (see `2026-09-05-mcp-consumer-registration-design.md`). Same discovery
@@ -35,12 +52,17 @@ idea, same quick-pick vocabulary, same copy-is-first-class rule.
 - **Editing or removing command files other than ours.**
 - **Project-level Claude Code commands** (`.claude/commands/`). User-level only,
   matching the MCP spec's scope.
-- **Merging with `src/mcp-consumers.ts`.** The two modules share a concept, not
-  an implementation; folding this into that one drags launcher-path resolution
-  into a feature that has no launcher. The exception is the VS Code profile
-  enumeration: `parseProfiles` and `samePath` are already correct and already
-  exported, so this module imports those two rather than re-deriving rules that
-  took a round of corrections to get right.
+- **Installing one half of the pair.** A row is an agent, not a file. Users who
+  install only `/perform-diff-review` get comments nothing knows how to work.
+  Per-file control exists only as a consequence of the marker rule below, which
+  can make one of the two files unwritable.
+- **Arguments to either command.** `/perform-diff-review` derives its own diff
+  range; `/address-diff-review` works every open thread. Argument syntax differs
+  across all four wrapper formats, and neither command has a use for one yet.
+- **Merging with `src/mcp-consumers.ts`.** The two modules share plumbing, not a
+  job; folding this into that one drags launcher-path resolution into a feature
+  that has no launcher. What they genuinely share is extracted instead — see
+  **Module split**.
 
 ## Why this is easier than MCP registration
 
@@ -56,12 +78,17 @@ See **Version marker** below.
 
 ## Targets
 
-| Agent | Path | Format | Invocation |
+Each agent directory holds **two** files, named after the commands they define.
+
+| Agent | Directory | Files | Format |
 |---|---|---|---|
-| Claude Code | `~/.claude/commands/address-diff-review-comments.md` | Markdown + YAML frontmatter | `/address-diff-review-comments` |
-| Codex CLI | `~/.codex/prompts/address-diff-review-comments.md` | plain Markdown | `/address-diff-review-comments` |
-| Gemini CLI | `~/.gemini/commands/address-diff-review-comments.toml` | TOML (`description`, `prompt`) | `/address-diff-review-comments` |
-| VS Code family | `<profile>/prompts/address-diff-review-comments.prompt.md` | Markdown + frontmatter | `/address-diff-review-comments` |
+| Claude Code | `~/.claude/commands/` | `perform-diff-review.md`, `address-diff-review.md` | Markdown + YAML frontmatter |
+| Codex CLI | `~/.codex/prompts/` | `perform-diff-review.md`, `address-diff-review.md` | plain Markdown |
+| Gemini CLI | `~/.gemini/commands/` | `perform-diff-review.toml`, `address-diff-review.toml` | TOML (`description`, `prompt`) |
+| VS Code family | `<profile>/prompts/` | `perform-diff-review.prompt.md`, `address-diff-review.prompt.md` | Markdown + frontmatter |
+
+In every case the file's basename is the invocation: `/perform-diff-review` and
+`/address-diff-review`.
 
 Codex honours `$CODEX_HOME`, as in the MCP module.
 
@@ -79,45 +106,93 @@ MCP module only. The app list is narrowed to `Code`, `Code - Insiders` and
 > pointing at their own project-level directory. Confirming prompt-file support
 > would move them into this table later.
 
-## Module: `src/agent-command.ts`
+## Module split
 
-New file, pure, no `vscode` import — same constraints as `mcp-consumers.ts`, so
-it stays unit-testable and could be reused elsewhere.
+Three files, none importing `vscode`, all unit-testable under `node:test`.
+
+### `src/slash-commands.ts` (new)
+
+Discovery, status, bodies, writers. Named for what the files are: `command`
+alone is VS Code's own word (`contributes.commands`, `registerCommand`), and
+this feature contributes one of those too.
 
 ```ts
 type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
+type CommandId = 'perform' | 'address';
 type Status = 'current' | 'stale' | 'missing';
 
-interface AgentCommandTarget {
-    id: string;          // 'claude', 'codex', 'gemini', 'vscode', 'vscode:profile:Work'
-    label: string;       // 'Claude Code', 'VS Code — profile "Work"'
-    kind: CommandKind;
+interface CommandFile {
+    command: CommandId;
     filePath: string;
-    invocation: string;  // what the user types
+    invocation: string;   // '/perform-diff-review'
     status: Status;
-    /** True when we can safely write this file; false ⇒ copy-only row. */
+    /** True when we can safely write this file; false ⇒ copy-only. */
     writable: boolean;
     /** Why writable is false, shown in the UI. */
     reason?: string;
+}
+
+interface SlashCommandTarget {
+    id: string;           // 'claude', 'codex', 'vscode:profile:Work'
+    label: string;        // 'Claude Code', 'VS Code — profile "Work"'
+    kind: CommandKind;
+    dirPath: string;
+    /** Always both, in perform → address order. */
+    files: CommandFile[];
+    /** Worst of the two: any missing ⇒ missing, else any stale ⇒ stale. */
+    status: Status;
+    /** True when at least one file can be written. */
+    writable: boolean;
 }
 ```
 
 Exported surface:
 
-- `discoverAgentCommands(env?): AgentCommandTarget[]`
-- `renderBody(kind): string` — the full file content for that agent
-- `renderClipboard(target): string` — the body plus a "save this to `<path>`" line
-- `install(target): WriteResult` — throws with a user-facing message on failure
+- `discoverSlashCommands(env?): SlashCommandTarget[]`
+- `renderBody(kind, command): string` — the full file content
+- `renderClipboard(target, command): string` — the body plus a "save this to
+  `<path>`" line
+- `install(target): WriteResult[]` — one result per file written; throws with a
+  user-facing message on failure
 
-`WriteResult` is the shape `mcp-consumers.ts` already exports (written path plus
-optional backup path); this module re-uses it rather than inventing a parallel
-one.
+### `src/vscode-profiles.ts` (new, extracted)
+
+The VS Code-family install layout, moved out of `mcp-consumers.ts` unchanged
+except where noted: `VSCODE_APPS`, `userDataRoot()`, `parseProfiles()`.
+
+`parseProfiles` currently filters on `useDefaultFlags?.mcp !== true` — an
+MCP-specific rule the Targets section above says does not apply to prompts. It
+gains an optional flag-name parameter (`parseProfiles(storageJson, 'mcp')`);
+callers that pass nothing get every profile. **This corrects the previous
+revision of this spec, which claimed `parseProfiles` was reusable as-is.**
+
+`samePath` is *not* shared. It exists to compare a configured launcher path
+against ours; command status never compares paths. **This also corrects the
+previous revision.**
+
+`VSCODE_APPS` stays the full five-app list; the narrowing to three is this
+feature's own filter, not a change to the shared data.
+
+### `src/file-write.ts` (new, extracted)
+
+`readText()`, `backup()` and the `WriteResult` interface, moved out of
+`mcp-consumers.ts`. Small, but shared verbatim, and `backup()` encodes the
+`.diff-review-backup` convention that must stay identical across both features.
+
+`Status` is *not* shared. Both modules declare their own: the MCP one compares a
+launcher path inside a parsed config, this one compares whole files byte for
+byte. Same word, different question.
+
+`mcp-consumers.ts` keeps its job and its public surface, losing roughly sixty
+lines to the two extracted modules. Its existing tests continue to pass
+unchanged, since every moved function keeps its signature bar the new optional
+`parseProfiles` argument.
 
 ### Discovery
 
-A row exists when the agent's **command directory** exists. A missing *file*
-under an existing directory is a `missing` row; a missing *directory* produces
-no row at all.
+A row exists when the agent's **command directory** exists. Missing *files*
+under an existing directory are `missing` entries; a missing *directory*
+produces no row at all.
 
 This inverts the MCP rule, where an absent `mcp.json` under an existing user
 directory was still a row. The reason is that `mcp.json` is a file the consumer
@@ -126,11 +201,14 @@ have that Claude Code is installed at all.
 
 ### Status
 
-Read the file and compare against `renderBody(kind)`:
+Per file, read and compare against `renderBody(kind, command)`:
 
 - absent → `missing`
 - byte-identical → `current`
 - anything else → `stale`
+
+The row's status is the worse of the two, so a half-installed agent never reads
+as done.
 
 ### Version marker
 
@@ -138,32 +216,42 @@ Every rendered body carries a marker on its own line, in the comment syntax of
 its format:
 
 ```
-<!-- diff-review:address-comments v1 -->
+<!-- diff-review:perform v1 -->
+<!-- diff-review:address v1 -->
 ```
 
-A `stale` file **with** the marker is a previous version of ours: safe to
+A `stale` file **with** its marker is a previous version of ours: safe to
 overwrite, backed up first. A `stale` file **without** it was written by the
-user or another tool: the row degrades to `writable: false` with
+user or another tool: that `CommandFile` degrades to `writable: false` with
 `reason: 'file not written by Diff Review'`, and the only offered action is
-copy. This is what keeps an overwrite from destroying a hand-tuned prompt.
+copy.
 
-The marker version bumps only when the body changes.
+The rule applies per file. A hand-tuned `address-diff-review.md` does not block
+writing `perform-diff-review.md` alongside it; the row stays writable and the
+modal says which of the two will be skipped and why.
+
+Each marker's version bumps only when that body changes, independently of the
+other.
 
 ### Writers
 
-Write the file, creating parent directories as needed. No new runtime
-dependency: the Gemini TOML file is ours alone, so we emit it rather than parse
-and edit it.
+Write each file, creating parent directories as needed. No new runtime
+dependency: the Gemini TOML files are ours alone, so we emit them rather than
+parse and edit them.
+
+`install` writes every file that is `writable` and not already `current`, and
+returns a `WriteResult` per file. A failure on the first file does not suppress
+the second: results and errors are collected, and the caller reports both.
 
 **Backups.** Before overwriting a `stale` file, copy it to
 `<file>.diff-review-backup`, overwriting a previous backup — same convention and
 same reporting as the MCP writers. Never on `missing`.
 
-## The prompt body
+## The prompt bodies
 
-One instruction body, four wrappers. Only frontmatter differs; the Markdown
-below the marker is identical across all four, so there is one thing to maintain
-and one thing to review.
+Two instruction bodies, four wrappers each. Only frontmatter differs by wrapper;
+the Markdown below each marker is identical across all four, so each body is one
+thing to maintain and one thing to review.
 
 Frontmatter per kind:
 
@@ -172,50 +260,96 @@ Frontmatter per kind:
 - **`codex-md`** — none
 - **`gemini-toml`** — `description` key, body as a multi-line `prompt` string
 
-The body instructs the agent to:
+Both bodies open with the same failure check, because it is the failure everyone
+will hit first: **call `listDiffComments`; if the tool is unavailable, stop and
+tell the user to run `Diff Review: Register MCP Server with a Coding Agent`.**
+The command is useless without the MCP server.
 
-1. Call `listDiffComments`. **If the tool is unavailable, stop and tell the user
-   to run `Diff Review: Register MCP Server with a Coding Agent`** — the command
-   is useless without the MCP server, and this is the failure everyone will hit
-   first.
+Their tone and their discipline about acting on the user's comments and nothing
+else follow the existing `review-file` command.
+
+### `/perform-diff-review`
+
+1. Call `listDiffComments` — the availability check, and at the same time the
+   list of threads that already exist, so the review does not restate them.
+2. Establish the diff range: the merge-base of `HEAD` with the first of
+   `origin/main`, `main`, `master` that resolves. Review
+   `git diff <base>...HEAD` **plus** uncommitted working-tree changes. If no
+   base resolves, say so and review the working tree only.
+3. Review **only changed lines**. Correctness first — bugs, unhandled edge
+   cases, missing error handling, broken invariants. Not style, not
+   preferences, and not pre-existing code the diff merely sits next to.
+4. `createDiffComment` per finding, with the workspace-relative path and a
+   **1-based line number in the file as it currently stands**. Diff hunk
+   numbering is not file numbering: read the file and confirm the line before
+   commenting. One finding per thread.
+5. **Never edit code. Never commit.** This command's entire output is comment
+   threads; fixing them is `/address-diff-review`'s job, after the user has
+   read them.
+6. Report a summary: how many threads were created, where, and what was
+   reviewed but found clean.
+
+### `/address-diff-review`
+
+1. Call `listDiffComments`.
 2. Work the open threads oldest-first, addressing each in the code.
 3. `replyToDiffComment` on each, stating what changed — or why it did not.
 4. `resolveDiffComment` only on threads actually addressed.
 5. Never commit.
 6. Report what was addressed and what was left open.
 
-Its tone and its discipline about acting on the user's comments and nothing else
-follow the existing `review-file` command.
+Unchanged from the previous revision but for its name.
 
-## Command: `diffReview.installAgentCommand`
+## Command: `diffReview.installAgentCommands`
 
-Title: *Diff Review: Install the `/address-diff-review-comments` Agent Command*.
-Contributed alongside `diffReview.registerMcpServer` and registered in
-`activate()`.
+Title: *Diff Review: Install the Diff Review Agent Commands*. Contributed
+alongside `diffReview.registerMcpServer` and registered in `activate()`.
 
-A quick pick in the same style, each row labelled by status:
+A quick pick in the same style, **one row per agent**, labelled by the row's
+aggregate status:
 
 ```
 $(check)           Claude Code                      installed
-                   ~/.claude/commands/address-diff-review-comments.md
-$(warning)         Codex CLI                        installed — older version
-                   ~/.codex/prompts/address-diff-review-comments.md
+                   ~/.claude/commands/ — both commands
+$(warning)         Codex CLI                        1 of 2 installed
+                   ~/.codex/prompts/
+$(warning)         VS Code — profile "Work"         installed — older version
+                   .../User/profiles/work/prompts/
 $(circle-outline)  Gemini CLI                       not installed
-                   ~/.gemini/commands/address-diff-review-comments.toml
+                   ~/.gemini/commands/
 $(circle-outline)  Cursor                           not installed (manual)
                    .cursor/commands/ — workspace-scoped commands
 ```
 
-Each row carries a reveal-in-file-explorer button, matching the MCP command.
+Each row carries a reveal-in-file-explorer button pointing at the directory,
+matching the MCP command.
+
+The label is a function of the two file statuses, not of the row status alone:
+
+| Files | Label | Icon |
+|---|---|---|
+| both `current` | installed | `$(check)` |
+| both `missing` | not installed | `$(circle-outline)` |
+| one `current`, one `missing` | 1 of 2 installed | `$(warning)` |
+| any `stale` | installed — older version | `$(warning)` |
+| any file not writable | the above, plus *(manual)* | unchanged |
+
+`stale` wins over a `missing` sibling in the label, since the older-version case
+is the one the user needs to understand before picking.
 
 **On pick:**
 
-- `current` → info message, no write.
-- `missing` / `stale`, `writable` → modal showing the destination path and the
-  body, with before → after for `stale`. Buttons: **Write** / **Copy** /
-  **Cancel**. Write backs up when overwriting, writes, and reports both paths.
-- not `writable` → straight to the clipboard, naming the file to paste into and
-  why we did not write it.
+- `current` → info message naming both invocations, no write.
+- `missing` / `stale`, `writable` → modal listing both destination paths and
+  both bodies, with before → after for a `stale` file, and an explicit line for
+  any file being skipped under the marker rule. Buttons: **Write** / **Copy** /
+  **Cancel**. Write backs up what it overwrites and reports every path written.
+- not `writable` (neither file can be written) → straight to copy.
+
+**Copy** opens a second quick pick — *perform / address / both* — then copies
+the chosen bodies, each preceded by its "save this to `<path>`" line. Two full
+prompt bodies on the clipboard unannounced is worse than one question, and an
+agent with no command directory usually wants one of them at a time.
 
 **Copy is available on every row**, including `current`. It is the entire path
 for anyone on ChatGPT or a web agent with no command directory, so it is a
@@ -225,47 +359,63 @@ first-class action rather than a modal afterthought.
 
 The only edit to the existing flow: the MCP registration success message gains a
 follow-up action pointing at this command. The two features are useless apart —
-the MCP server with no prompt is a tool nobody invokes, and the prompt with no
-MCP server is a slash command that errors — so each should name the other at the
-moment the user has just finished the first.
+the MCP server with no prompts is a set of tools nobody invokes, and the prompts
+with no MCP server are slash commands that error — so each should name the other
+at the moment the user has just finished the first.
 
 ## Error handling
 
 Every failure path ends in a copyable body rather than a dead end. Unreadable
-file, unwritable directory, permission error — all downgrade the row to
-copy-only with the reason shown, and never throw out of the command handler.
+file, unwritable directory, permission error — all downgrade the affected
+`CommandFile` to copy-only with the reason shown, and never throw out of the
+command handler. A row is only fully copy-only when both of its files are.
 
 ## Verification
 
-`test/agent-command.test.js`, under the existing `node:test` runner, over the
+`test/slash-commands.test.js`, under the existing `node:test` runner, over the
 pure transforms:
 
-- status detection per kind across `missing` / `current` / `stale`
-- the marker rule: `stale` with marker is writable, `stale` without is not
-- body rendering per wrapper — frontmatter correct, body identical below the
-  marker, Gemini's TOML string escaping intact
+- per-file status detection per kind across `missing` / `current` / `stale`
+- row-status aggregation over all four combinations of two file statuses
+- the marker rule: `stale` with marker is writable, `stale` without is not —
+  and that one unwritable file leaves the other writable
+- body rendering: both commands across all four wrappers, frontmatter correct,
+  body identical below the marker between wrappers, Gemini's TOML string
+  escaping intact
 - path construction, including the nested profile `location` case that the MCP
   implementation got wrong the first time
 
+`test/vscode-profiles.test.js` covers `parseProfiles` with and without a flag
+name — the MCP caller's existing behaviour, and this feature's unfiltered one.
+The existing `test/mcp-consumers.test.js` must keep passing untouched; that is
+the check on the extraction.
+
 Beyond the tests:
 
-1. Run `discoverAgentCommands()` read-only against the real machine and eyeball
+1. Run `discoverSlashCommands()` read-only against the real machine and eyeball
    the list — Claude Code, Codex, Gemini and the VS Code profiles all present.
 2. Exercise the writers against temp-directory copies before anything touches a
    real path.
 3. Manual sandbox pass (`npm run sandbox`) through each outcome:
-   already-current, version upgrade, hand-edited file, copy-only.
-4. End to end: install into Claude Code, leave real comments in the editor, run
-   the slash command, confirm the replies and resolutions land back in the
-   editor.
+   already-current, version upgrade, half-installed, one file hand-edited,
+   copy-only.
+4. End to end, the full loop: install into Claude Code, run
+   `/perform-diff-review` on a branch with a real change, confirm the threads
+   appear in the gutter, delete one and keep the rest, then run
+   `/address-diff-review` and confirm the replies and resolutions land back in
+   the editor.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `src/agent-command.ts` | new — discovery, status, bodies, writers |
-| `test/agent-command.test.js` | new — tests over the pure transforms |
-| `src/extension.ts` | register `diffReview.installAgentCommand`, quick pick UI; MCP success follow-up |
+| `src/slash-commands.ts` | new — discovery, status, both bodies, writers |
+| `src/vscode-profiles.ts` | new — extracted app list, user-data roots, `parseProfiles` |
+| `src/file-write.ts` | new — extracted `readText`, `backup`, `WriteResult` |
+| `src/mcp-consumers.ts` | drop the extracted code, import it back; `parseProfiles(json, 'mcp')` |
+| `test/slash-commands.test.js` | new — tests over the pure transforms |
+| `test/vscode-profiles.test.js` | new — profile parsing with and without a flag name |
+| `src/extension.ts` | register `diffReview.installAgentCommands`, quick pick UI; MCP success follow-up |
 | `package.json` | contribute the command |
-| `README.md` | document the command alongside MCP setup |
+| `README.md` | document both commands alongside MCP setup |
 | `TODO.md` | record it |
