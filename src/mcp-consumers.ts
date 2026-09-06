@@ -16,6 +16,7 @@ import * as path from 'path';
 import { applyEdits, modify, parse as parseJsonc, ParseError } from 'jsonc-parser';
 
 import { LAUNCHER_FILE } from './mcp-resolve';
+import { readText, backup, WriteResult } from './file-write';
 
 /** The key every consumer registers us under. */
 export const SERVER_NAME = 'diff-review';
@@ -298,10 +299,6 @@ function userDataRoot(app: AppSpec, home: string, platform: NodeJS.Platform): st
     return path.join(home, '.config', app.dir, 'User');
 }
 
-function readText(file: string): string | null {
-    try { return fs.readFileSync(file, 'utf-8'); } catch { return null; }
-}
-
 export interface ProfileRef {
     /** Path under `profiles/`, which may be nested (e.g. "builtin/agents"). */
     location: string;
@@ -407,18 +404,6 @@ export function snippetDestination(target: McpConsumerTarget): string {
 }
 
 // --------------- Registration ---------------
-
-export interface WriteResult {
-    /** The backup taken before the write, when there was a file to back up. */
-    backup?: string;
-}
-
-function backup(file: string): string | undefined {
-    if (!fs.existsSync(file)) return undefined;
-    const dest = file + '.diff-review-backup';
-    fs.copyFileSync(file, dest);
-    return dest;
-}
 
 /**
  * Write the entry into this consumer's config. Throws with a user-facing message

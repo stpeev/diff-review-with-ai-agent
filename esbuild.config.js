@@ -46,6 +46,7 @@ const targets = {
     'scope-id': { ...shared, entryPoints: ['src/scope-id.ts'], outfile: 'out/scope-id.js', target: 'node18' },
     'comment-store': { ...shared, entryPoints: ['src/comment-store.ts'], outfile: 'out/comment-store.js', target: 'node18' },
     'path-util': { ...shared, entryPoints: ['src/path-util.ts'], outfile: 'out/path-util.js', target: 'node18' },
+    'file-write': { ...shared, entryPoints: ['src/file-write.ts'], outfile: 'out/file-write.js', target: 'node18' },
 };
 
 module.exports = { shared, targets };

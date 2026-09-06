@@ -19,7 +19,7 @@
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
     "sandbox": "npm run build && node scripts/sandbox.js",
-    "test": "node esbuild.config.js consumers ipc-discovery scope-id comment-store path-util && node --test test/*.test.js"
+    "test": "node esbuild.config.js consumers file-write ipc-discovery scope-id comment-store path-util && node --test test/*.test.js"
   },
   "engines": {
     "vscode": "^1.93.0"
