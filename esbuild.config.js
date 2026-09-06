@@ -50,6 +50,7 @@ const targets = {
     'file-write': { ...shared, entryPoints: ['src/file-write.ts'], outfile: 'out/test/file-write.js', target: 'node18' },
     'vscode-profiles': { ...shared, entryPoints: ['src/vscode-profiles.ts'], outfile: 'out/test/vscode-profiles.js', target: 'node18' },
     'slash-commands': { ...shared, entryPoints: ['src/slash-commands.ts'], outfile: 'out/test/slash-commands.js', target: 'node18' },
+    'git-scope': { ...shared, entryPoints: ['src/git-scope.ts'], outfile: 'out/test/git-scope.js', target: 'node18' },
 };
 
 /**
@@ -65,7 +66,7 @@ const groups = {
     // `node --test` can require it directly.
     standalone: [
         'consumers', 'file-write', 'vscode-profiles', 'slash-commands',
-        'ipc-discovery', 'scope-id', 'comment-store', 'path-util',
+        'ipc-discovery', 'scope-id', 'comment-store', 'path-util', 'git-scope',
     ],
 };
 

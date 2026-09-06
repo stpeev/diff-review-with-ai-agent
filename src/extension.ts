@@ -11,6 +11,7 @@ import {
     discoverSlashCommands, renderClipboard, install, INVOCATION,
 } from './slash-commands';
 import { isAncestor, resolveWithinRoot } from './path-util';
+import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
 import {
@@ -270,10 +271,6 @@ function realpathOrSelf(p: string): string {
     }
 }
 
-function shortSha(sha: string | undefined): string {
-    return (sha ?? 'unknown').slice(0, 8);
-}
-
 function scopeDirFor(scopeId: string): string {
     return path.join(globalStorageRoot(), 'scopes', scopeIdMod.scopeDirName(scopeId));
 }
@@ -327,11 +324,17 @@ async function tryResolveGitScope(folder: FolderInfo): Promise<boolean> {
     const repo = git.repositories.find((r: any) => isAncestor(realpathOrSelf(r.rootUri.fsPath), folder.realPath));
     if (!repo) return false;
 
-    folder.repo = repo;
+    // The repo object exists well before its first status refresh fills
+    // `state` in. Resolving from that empty state would key this folder to a
+    // `repo:` scope on `_detached.unknown` — the wrong comments.json — so
+    // stay pending and let the caller's poll loop ask again.
     const repoRealPath = realpathOrSelf(repo.rootUri.fsPath);
-    const remoteUrl: string | undefined = repo.state.remotes?.[0]?.fetchUrl || repo.state.remotes?.[0]?.pushUrl;
-    folder.scopeId = remoteUrl ? scopeIdMod.scopeIdForRemote(remoteUrl) : scopeIdMod.scopeIdForRepo(repoRealPath);
-    folder.branchKey = repo.state.HEAD?.name || `_detached.${shortSha(repo.state.HEAD?.commit)}`;
+    const scope = gitScopeFor(repo.state, repoRealPath);
+    if (!scope) return false;
+
+    folder.repo = repo;
+    folder.scopeId = scope.scopeId;
+    folder.branchKey = scope.branchKey;
     folder.state = 'git';
     outputLog.appendLine(`[Diff Review] ${folder.folderPath}: git — scope ${folder.scopeId}, branch ${folder.branchKey}`);
 
@@ -342,11 +345,34 @@ async function tryResolveGitScope(folder: FolderInfo): Promise<boolean> {
 
 function registerRepoWatcher(folder: FolderInfo, repo: any) {
     repo.state.onDidChange(() => {
-        const newBranchKey = repo.state.HEAD?.name || `_detached.${shortSha(repo.state.HEAD?.commit)}`;
-        if (folder.branchKey && newBranchKey !== folder.branchKey) {
-            switchFolderBranch(folder, newBranchKey);
+        const scope = gitScopeFor(repo.state, realpathOrSelf(repo.rootUri.fsPath));
+        if (!scope) return;
+        // A remote can appear after we settled (a slow refresh, or `git remote
+        // add`), which moves this folder to a different scope file. Re-settle
+        // onto it rather than stranding the session on the old one.
+        if (scope.scopeId !== folder.scopeId) {
+            switchFolderScope(folder, scope);
+            return;
+        }
+        if (folder.branchKey && scope.branchKey !== folder.branchKey) {
+            switchFolderBranch(folder, scope.branchKey);
         }
     });
+}
+
+/** The folder's scope id changed under us (see `registerRepoWatcher`): drop this scope's threads and re-settle onto the new scope file. */
+async function switchFolderScope(folder: FolderInfo, scope: { scopeId: string; branchKey: string }) {
+    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: scope ${folder.scopeId} → ${scope.scopeId}`);
+    await flushFolderSaveNow(folder);
+
+    const owned = threadsOwnedByFolder(folder);
+    for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
+    for (const id of owned.driftedIds) driftedMap.delete(id);
+
+    folder.scopeId = scope.scopeId;
+    folder.branchKey = scope.branchKey;
+    settleFolder(folder);
+    watchFolderScope(folder);
 }
 
 /** Called once a folder's scope/branch is known: sets `filePath`, loads its threads, flushes any deferred save. */
