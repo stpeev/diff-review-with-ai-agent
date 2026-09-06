@@ -123,8 +123,8 @@ the command palette — this command is useless without it.
 
 ### 2. Work the open threads oldest-first
 
-For each open thread, in order: read its full text and the surrounding code,
-then make the change it asks for.
+For each open thread, oldest-first, read the full thread and surrounding context. Determine whether 
+the comment requests a discussion, a design-document revision, or an implementation change.
 
 ### 3. Reply to every thread you touch
 
