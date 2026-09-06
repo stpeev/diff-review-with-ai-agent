@@ -3,7 +3,12 @@
   "displayName": "Diff Review with AI Agent",
   "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot, Claude Code, or any AI agent, with git diff context",
   "version": "0.4.0",
-  "publisher": "JinqiShen / Stanimir Peev",
+  "publisher": "JinqiShen",
+  "contributors": [
+    {
+      "name": "Stanimir Peev"
+    }
+  ],
   "icon": "icon.png",
   "repository": {
     "type": "git",
@@ -11,7 +16,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "build": "node esbuild.config.js ext mcp launcher",
+    "build": "node esbuild.config.js ship",
     "build:ext": "node esbuild.config.js ext",
     "build:mcp": "node esbuild.config.js mcp",
     "build:launcher": "node esbuild.config.js launcher",
@@ -19,7 +24,7 @@
     "deploy": "npm run build && node scripts/local-deploy.js",
     "deploy:fast": "npm run build && node scripts/local-deploy.js --fast",
     "sandbox": "npm run build && node scripts/sandbox.js",
-    "test": "node esbuild.config.js consumers ipc-discovery scope-id comment-store path-util && node --test test/*.test.js"
+    "test": "node esbuild.config.js standalone && node --test test/*.test.js"
   },
   "engines": {
     "vscode": "^1.93.0"
@@ -100,6 +105,11 @@
         "command": "diffReview.registerMcpServer",
         "title": "Diff Review: Register MCP Server with a Coding Agent",
         "icon": "$(plug)"
+      },
+      {
+        "command": "diffReview.installAgentCommands",
+        "title": "Diff Review: Install the Diff Review Agent Commands",
+        "icon": "$(terminal)"
       },
       {
         "command": "diffReview.showPanel",

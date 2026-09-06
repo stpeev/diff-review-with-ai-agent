@@ -16,6 +16,8 @@ import * as path from 'path';
 import { applyEdits, modify, parse as parseJsonc, ParseError } from 'jsonc-parser';
 
 import { LAUNCHER_FILE } from './mcp-resolve';
+import { readText, backup, WriteResult } from './file-write';
+import { VSCODE_APPS, userDataRoot, ProfileRef, parseProfiles as parseProfilesShared } from './vscode-profiles';
 
 /** The key every consumer registers us under. */
 export const SERVER_NAME = 'diff-review';
@@ -273,58 +275,16 @@ function shortenHome(p: string, home: string): string {
 
 // --------------- Discovery ---------------
 
-interface AppSpec {
-    id: string;
-    label: string;
-    /** Directory name under the platform's user-data root. */
-    dir: string;
-}
-
-const VSCODE_APPS: AppSpec[] = [
-    { id: 'vscode', label: 'VS Code', dir: 'Code' },
-    { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
-    { id: 'vscodium', label: 'VSCodium', dir: 'VSCodium' },
-    { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
-    { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
-];
-
-/** Where a platform keeps `<App>/User/`. */
-function userDataRoot(app: AppSpec, home: string, platform: NodeJS.Platform): string {
-    if (platform === 'win32') {
-        const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-        return path.join(appData, app.dir, 'User');
-    }
-    if (platform === 'darwin') return path.join(home, 'Library', 'Application Support', app.dir, 'User');
-    return path.join(home, '.config', app.dir, 'User');
-}
-
-function readText(file: string): string | null {
-    try { return fs.readFileSync(file, 'utf-8'); } catch { return null; }
-}
-
-export interface ProfileRef {
-    /** Path under `profiles/`, which may be nested (e.g. "builtin/agents"). */
-    location: string;
-    name: string;
-}
-
 /**
  * The profiles that keep their own MCP config.
  *
- * `storage.json` is authoritative — directories under `profiles/` outlive the
- * profiles that made them, so a readdir invents rows for state VS Code ignores.
- * A profile with `useDefaultFlags.mcp` reads the default profile's mcp.json, so
- * it is not a separate target either.
+ * A profile with `useDefaultFlags.mcp` reads the default profile's mcp.json,
+ * so it is not a separate target — `parseProfilesShared`'s `defaultFlag`
+ * encodes that MCP-specific rule; `slash-commands.ts` has no such flag and
+ * calls the shared function with none.
  */
 export function parseProfiles(storageJson: string | null): ProfileRef[] {
-    if (!storageJson) return [];
-    let profiles: any;
-    try { profiles = JSON.parse(storageJson).userDataProfiles; } catch { return []; }
-    if (!Array.isArray(profiles)) return [];
-    return profiles
-        .filter(p => typeof p?.location === 'string' && typeof p?.name === 'string')
-        .filter(p => p.useDefaultFlags?.mcp !== true)
-        .map(p => ({ location: p.location as string, name: p.name as string }));
+    return parseProfilesShared(storageJson, 'mcp');
 }
 
 function targetFrom(
@@ -407,18 +367,6 @@ export function snippetDestination(target: McpConsumerTarget): string {
 }
 
 // --------------- Registration ---------------
-
-export interface WriteResult {
-    /** The backup taken before the write, when there was a file to back up. */
-    backup?: string;
-}
-
-function backup(file: string): string | undefined {
-    if (!fs.existsSync(file)) return undefined;
-    const dest = file + '.diff-review-backup';
-    fs.copyFileSync(file, dest);
-    return dest;
-}
 
 /**
  * Write the entry into this consumer's config. Throws with a user-facing message

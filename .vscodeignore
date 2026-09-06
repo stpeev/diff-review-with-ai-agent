@@ -11,3 +11,8 @@ gen-icon.js
 scripts
 TODO.md
 .sandbox
+# Standalone builds of pure modules, built only so `node --test` can require
+# them outside a VS Code host (see esbuild.config.js's `standalone` group) —
+# each one already ships inside out/extension.js via its own imports, so the
+# loose copy here is dead weight in the packaged extension.
+out/test

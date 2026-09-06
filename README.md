@@ -194,6 +194,29 @@ In order of preference:
 
 > **Note:** The VS Code extension must be running (window open and activated) for the MCP server to connect. The MCP server communicates with the extension via a local IPC server — comments are always live, no stale files.
 
+### Agent Slash Commands
+
+Once the MCP server is registered, run **`Diff Review: Install the Diff
+Review Agent Commands`** from the command palette to install a matching pair
+of slash commands into any agent that reads commands from its own directory
+— Claude Code, Codex CLI, Gemini CLI, and VS Code's own Copilot Chat (per
+profile):
+
+- **`/perform-diff-review`** — reviews the current branch against its
+  merge-base and leaves inline review comments via the MCP tools. Never
+  edits code, never commits.
+- **`/address-diff-review`** — works every open comment thread: makes the
+  change, replies, and resolves.
+
+Run them as a pair, with a human reading the comments in between: perform a
+review, look at what landed in the gutter, then address it — ideally in a
+fresh agent session so it isn't anchored to its own review.
+
+The command lists every agent it finds and whether both commands are
+installed and current in each, matching the same discovery style as MCP
+registration. Cursor and Windsurf use workspace-scoped command directories,
+so they get a copy-only row pointing at where to paste the prompt by hand.
+
 ### Clipboard Support
 Every action that sends to Copilot also has a **Copy to Clipboard** variant — paste the structured prompt into Claude Code, Codex CLI, ChatGPT, or any AI:
 - **Per-thread**: 📋 button on the thread title bar
