@@ -191,6 +191,138 @@ export function renderBody(kind: CommandKind, command: CommandId): string {
     }
 }
 
+// --------------- Discovery and status ---------------
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { readText } from './file-write';
+import { VSCODE_APPS, userDataRoot, parseProfiles } from './vscode-profiles';
+
+export type Status = 'current' | 'stale' | 'missing';
+
+export interface CommandFile {
+    command: CommandId;
+    filePath: string;
+    invocation: string;
+    status: Status;
+    /** True when we can safely write this file; false ⇒ copy-only. */
+    writable: boolean;
+    /** Why `writable` is false, shown in the UI. */
+    reason?: string;
+}
+
+export interface SlashCommandTarget {
+    id: string;
+    label: string;
+    kind: CommandKind;
+    dirPath: string;
+    /** Always both, in perform → address order. */
+    files: CommandFile[];
+    /** Worst of the two: any `missing` ⇒ missing, else any `stale` ⇒ stale. */
+    status: Status;
+    /** True when at least one file can be written. */
+    writable: boolean;
+}
+
+const EXT: Record<CommandKind, string> = {
+    'claude-md': 'md',
+    'codex-md': 'md',
+    'gemini-toml': 'toml',
+    'vscode-prompt': 'prompt.md',
+};
+
+function fileName(command: CommandId, kind: CommandKind): string {
+    return `${command}-diff-review.${EXT[kind]}`;
+}
+
+function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): CommandFile {
+    const filePath = path.join(dirPath, fileName(command, kind));
+    const text = readText(filePath);
+    const expected = renderBody(kind, command);
+    const base = { command, filePath, invocation: INVOCATION[command] };
+
+    if (text === null) return { ...base, status: 'missing', writable: true };
+    if (text === expected) return { ...base, status: 'current', writable: true };
+
+    const hasMarker = text.includes(MARKER[command]);
+    return hasMarker
+        ? { ...base, status: 'stale', writable: true }
+        : { ...base, status: 'stale', writable: false, reason: 'file not written by Diff Review' };
+}
+
+const STATUS_RANK: Record<Status, number> = { missing: 2, stale: 1, current: 0 };
+
+function buildTarget(id: string, label: string, kind: CommandKind, dirPath: string): SlashCommandTarget {
+    const files = (['perform', 'address'] as CommandId[]).map(command => inspectFile(dirPath, command, kind));
+    const status = files.reduce<Status>(
+        (worst, f) => (STATUS_RANK[f.status] > STATUS_RANK[worst] ? f.status : worst),
+        'current',
+    );
+    return { id, label, kind, dirPath, files, status, writable: files.some(f => f.writable) };
+}
+
+export interface DiscoveryEnv {
+    home?: string;
+    platform?: NodeJS.Platform;
+    codexHome?: string;
+}
+
+/**
+ * Every agent on this machine with a slash-command directory, and whether
+ * our two commands are installed and current in it.
+ *
+ * A row exists for Claude Code / Codex / Gemini only when their own command
+ * directory exists — that is the only evidence we have those agents are
+ * installed at all. For the VS Code family, a row exists when the app's or
+ * profile's own directory exists (matching `mcp-consumers.ts`'s
+ * `discoverConsumers`), since `storage.json` or the app root already proves
+ * installation independently of whether `prompts/` has been used yet.
+ */
+export function discoverSlashCommands(env: DiscoveryEnv = {}): SlashCommandTarget[] {
+    const home = env.home ?? os.homedir();
+    const platform = env.platform ?? process.platform;
+    const targets: SlashCommandTarget[] = [];
+
+    const claudeDir = path.join(home, '.claude', 'commands');
+    if (fs.existsSync(claudeDir)) {
+        targets.push(buildTarget('claude', 'Claude Code', 'claude-md', claudeDir));
+    }
+
+    const codexHome = env.codexHome ?? process.env.CODEX_HOME ?? path.join(home, '.codex');
+    const codexDir = path.join(codexHome, 'prompts');
+    if (fs.existsSync(codexDir)) {
+        targets.push(buildTarget('codex', 'Codex CLI', 'codex-md', codexDir));
+    }
+
+    const geminiDir = path.join(home, '.gemini', 'commands');
+    if (fs.existsSync(geminiDir)) {
+        targets.push(buildTarget('gemini', 'Gemini CLI', 'gemini-toml', geminiDir));
+    }
+
+    const vscodeIds = new Set(['vscode', 'vscode-insiders', 'vscodium']);
+    for (const app of VSCODE_APPS.filter(a => vscodeIds.has(a.id))) {
+        const root = userDataRoot(app, home, platform);
+        if (fs.existsSync(root)) {
+            targets.push(buildTarget(app.id, app.label, 'vscode-prompt', path.join(root, 'prompts')));
+        }
+
+        const profiles = parseProfiles(readText(path.join(root, 'globalStorage', 'storage.json')));
+        for (const profile of profiles) {
+            const profileDir = path.join(root, 'profiles', profile.location);
+            if (!fs.existsSync(profileDir)) continue;
+            targets.push(buildTarget(
+                `${app.id}:profile:${profile.location}`,
+                `${app.label} — profile "${profile.name}"`,
+                'vscode-prompt',
+                path.join(profileDir, 'prompts'),
+            ));
+        }
+    }
+
+    return targets;
+}
+
 // Exported for test/slash-commands.test.js only — not part of the module's
 // real surface, but the escaping logic is worth a direct unit test since the
 // authored bodies never exercise the case it guards against.

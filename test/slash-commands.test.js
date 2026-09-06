@@ -89,3 +89,180 @@ test('renderBody: gemini-toml escapes a literal """ in the body', () => {
     assert.ok(!escaped.includes('"""'));
     assert.match(escaped, /\\\\/);
 });
+
+// --------------- Discovery and status ---------------
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { discoverSlashCommands } = require('../out/slash-commands');
+
+function tmpHome() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'diff-review-slash-'));
+}
+
+test('discoverSlashCommands: no rows on an empty home', () => {
+    const targets = discoverSlashCommands({ home: tmpHome(), platform: 'linux' });
+    assert.strictEqual(targets.length, 0);
+});
+
+test('discoverSlashCommands: Claude Code row appears once ~/.claude/commands exists', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.claude', 'commands'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const claude = targets.find(t => t.id === 'claude');
+    assert.ok(claude, 'expected a claude row');
+    assert.strictEqual(claude.kind, 'claude-md');
+    assert.strictEqual(claude.files.length, 2);
+    assert.deepStrictEqual(claude.files.map(f => f.command).sort(), ['address', 'perform']);
+    assert.ok(claude.files.every(f => f.status === 'missing' && f.writable === true));
+    assert.strictEqual(claude.status, 'missing');
+});
+
+test('discoverSlashCommands: Codex CLI honours codexHome override', () => {
+    const home = tmpHome();
+    const codexHome = path.join(home, 'custom-codex');
+    fs.mkdirSync(path.join(codexHome, 'prompts'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux', codexHome });
+    const codex = targets.find(t => t.id === 'codex');
+    assert.ok(codex);
+    assert.strictEqual(codex.dirPath, path.join(codexHome, 'prompts'));
+});
+
+test('discoverSlashCommands: Gemini CLI row uses .toml filenames', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, '.gemini', 'commands'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const gemini = targets.find(t => t.id === 'gemini');
+    assert.ok(gemini);
+    assert.ok(gemini.files.every(f => f.filePath.endsWith('.toml')));
+});
+
+test('discoverSlashCommands: a fully current file is status current and writable', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/slash-commands').renderBody('claude-md', 'perform'));
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const claude = targets.find(t => t.id === 'claude');
+    const perform = claude.files.find(f => f.command === 'perform');
+    assert.strictEqual(perform.status, 'current');
+    assert.strictEqual(perform.writable, true);
+});
+
+test('discoverSlashCommands: a stale file with our marker is writable', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const { MARKER } = require('../out/slash-commands');
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), `${MARKER.perform}\nan older version\n`);
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const perform = targets.find(t => t.id === 'claude').files.find(f => f.command === 'perform');
+    assert.strictEqual(perform.status, 'stale');
+    assert.strictEqual(perform.writable, true);
+});
+
+test('discoverSlashCommands: a stale file without our marker is not writable', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), 'a hand-written command, not ours\n');
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const perform = targets.find(t => t.id === 'claude').files.find(f => f.command === 'perform');
+    assert.strictEqual(perform.status, 'stale');
+    assert.strictEqual(perform.writable, false);
+    assert.match(perform.reason, /not written by Diff Review/);
+});
+
+test('discoverSlashCommands: row status is the worse of its two files (missing wins)', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/slash-commands').renderBody('claude-md', 'perform'));
+    // address-diff-review.md left missing.
+    const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    assert.strictEqual(claude.status, 'missing');
+});
+
+test('discoverSlashCommands: row status is stale when one file is stale and the other current', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const sc = require('../out/slash-commands');
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
+    fs.writeFileSync(path.join(dir, 'address-diff-review.md'), `${sc.MARKER.address}\nold\n`);
+    const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    assert.strictEqual(claude.status, 'stale');
+});
+
+test('discoverSlashCommands: row status is current only when both files are', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const sc = require('../out/slash-commands');
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
+    fs.writeFileSync(path.join(dir, 'address-diff-review.md'), sc.renderBody('claude-md', 'address'));
+    const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    assert.strictEqual(claude.status, 'current');
+});
+
+test('discoverSlashCommands: row writable is true if at least one file is writable', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), 'hand-written\n');
+    const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    assert.strictEqual(claude.writable, true); // address-diff-review.md is still missing => writable
+});
+
+test('discoverSlashCommands: VS Code family row appears when the app root exists', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, 'Library', 'Application Support', 'Code', 'User'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'darwin' });
+    const vscode = targets.find(t => t.id === 'vscode');
+    assert.ok(vscode);
+    assert.strictEqual(vscode.kind, 'vscode-prompt');
+    assert.strictEqual(
+        vscode.dirPath,
+        path.join(home, 'Library', 'Application Support', 'Code', 'User', 'prompts'),
+    );
+    assert.ok(vscode.files.every(f => f.filePath.endsWith('.prompt.md')));
+});
+
+test('discoverSlashCommands: VS Code family excludes Cursor and Windsurf', () => {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, 'Library', 'Application Support', 'Cursor', 'User'), { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'darwin' });
+    assert.strictEqual(targets.find(t => t.id === 'cursor'), undefined);
+});
+
+test('discoverSlashCommands: a nested profile location builds the correct prompts path', () => {
+    const home = tmpHome();
+    const root = path.join(home, 'Library', 'Application Support', 'Code', 'User');
+    fs.mkdirSync(path.join(root, 'globalStorage'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'profiles', 'builtin', 'agents'), { recursive: true });
+    fs.writeFileSync(
+        path.join(root, 'globalStorage', 'storage.json'),
+        JSON.stringify({ userDataProfiles: [{ location: 'builtin/agents', name: 'Agents' }] }),
+    );
+    const targets = discoverSlashCommands({ home, platform: 'darwin' });
+    const profile = targets.find(t => t.id === 'vscode:profile:builtin/agents');
+    assert.ok(profile, 'expected a nested profile row');
+    assert.strictEqual(profile.label, 'VS Code — profile "Agents"');
+    assert.strictEqual(
+        profile.dirPath,
+        path.join(root, 'profiles', 'builtin', 'agents', 'prompts'),
+    );
+});
+
+test('discoverSlashCommands: a profile directory that does not exist on disk produces no row', () => {
+    const home = tmpHome();
+    const root = path.join(home, 'Library', 'Application Support', 'Code', 'User');
+    fs.mkdirSync(path.join(root, 'globalStorage'), { recursive: true });
+    fs.writeFileSync(
+        path.join(root, 'globalStorage', 'storage.json'),
+        JSON.stringify({ userDataProfiles: [{ location: 'ghost', name: 'Ghost' }] }),
+    );
+    const targets = discoverSlashCommands({ home, platform: 'darwin' });
+    assert.strictEqual(targets.find(t => t.id === 'vscode:profile:ghost'), undefined);
+});
