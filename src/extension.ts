@@ -129,6 +129,13 @@ function refreshGhost(id: number) {
     applyGhostPresentation(thread, rec);
 }
 
+/** Mark a drifted record resolved and re-render its ghost. The caller saves the record's uri. */
+function resolveDrifted(rec: DriftedRecord) {
+    rec.status = 'resolved';
+    rec.updatedAt = new Date().toISOString();
+    refreshGhost(rec.id);
+}
+
 /** Forget a drifted comment: the record and the ghost showing it go together. */
 function dropDrifted(id: number) {
     ghostThreads.get(id)?.dispose();
@@ -1710,8 +1717,16 @@ export function activate(context: vscode.ExtensionContext) {
             for (const thread of threadMap.values()) {
                 if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
             }
+            const driftedUris: vscode.Uri[] = [];
+            for (const rec of driftedMap.values()) {
+                if (rec.status === 'resolved') continue;
+                resolveDrifted(rec);
+                driftedUris.push(vscode.Uri.parse(rec.uri));
+                count++;
+            }
             refresh();
             for (const thread of touched) queueSaveForThread(thread);
+            for (const uri of driftedUris) queueSaveForUri(uri);
             if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''}.`);
         })
     );
@@ -1720,13 +1735,16 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.deleteResolved', async () => {
             const resolved = [...threadMap.entries()].filter(([, t]) => t.contextValue === 'resolved');
-            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
+            const resolvedDrifted = [...driftedMap.values()].filter(rec => rec.status === 'resolved');
+            const total = resolved.length + resolvedDrifted.length;
+            if (total === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
             const answer = await vscode.window.showWarningMessage(
-                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
+                `Delete ${total} resolved comment${total !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
             );
             if (answer !== 'Delete') return;
             const uris: vscode.Uri[] = [];
             for (const [id, thread] of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
+            for (const rec of resolvedDrifted) { uris.push(vscode.Uri.parse(rec.uri)); dropDrifted(rec.id); }
             refresh();
             for (const uri of uris) queueSaveForUri(uri);
         })
@@ -1772,16 +1790,24 @@ export function activate(context: vscode.ExtensionContext) {
     // --- File-level batch: resolve file ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.resolveFile', (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
+            const entries = getThreadsByFile().get(fileKey) ?? [];
+            const driftedEntries = getDriftedByFile().get(fileKey) ?? [];
+            if (entries.length === 0 && driftedEntries.length === 0) return;
             let count = 0;
             const touched: vscode.CommentThread[] = [];
             for (const { thread } of entries) {
                 if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
             }
+            const driftedUris: vscode.Uri[] = [];
+            for (const rec of driftedEntries) {
+                if (rec.status === 'resolved') continue;
+                resolveDrifted(rec);
+                driftedUris.push(vscode.Uri.parse(rec.uri));
+                count++;
+            }
             refresh();
             for (const thread of touched) queueSaveForThread(thread);
+            for (const uri of driftedUris) queueSaveForUri(uri);
             if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''} in ${fileKey}.`);
         })
     );
@@ -1789,17 +1815,18 @@ export function activate(context: vscode.ExtensionContext) {
     // --- File-level batch: delete resolved in file ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.deleteResolvedFile', async (fileKey: string) => {
-            const byFile = getThreadsByFile();
-            const entries = byFile.get(fileKey);
-            if (!entries) return;
+            const entries = getThreadsByFile().get(fileKey) ?? [];
             const resolved = entries.filter(e => e.thread.contextValue === 'resolved');
-            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
+            const resolvedDrifted = (getDriftedByFile().get(fileKey) ?? []).filter(rec => rec.status === 'resolved');
+            const total = resolved.length + resolvedDrifted.length;
+            if (total === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
             const answer = await vscode.window.showWarningMessage(
-                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
+                `Delete ${total} resolved comment${total !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
             );
             if (answer !== 'Delete') return;
             const uris: vscode.Uri[] = [];
             for (const { id, thread } of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
+            for (const rec of resolvedDrifted) { uris.push(vscode.Uri.parse(rec.uri)); dropDrifted(rec.id); }
             refresh();
             for (const uri of uris) queueSaveForUri(uri);
         })
