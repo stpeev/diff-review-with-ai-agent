@@ -1808,9 +1808,12 @@ async function registerWithConsumer(target: McpConsumerTarget) {
 
     try {
         const { backup } = register(target);
-        vscode.window.showInformationMessage(
-            `Diff Review: registered with ${target.label}.` +
-            (backup ? ` Previous config saved to ${homeShort(backup)}.` : ''));
+        const message = `Diff Review: registered with ${target.label}.` +
+            (backup ? ` Previous config saved to ${homeShort(backup)}.` : '');
+        const action = 'Install Agent Commands';
+        vscode.window.showInformationMessage(message, action).then(picked => {
+            if (picked === action) { vscode.commands.executeCommand('diffReview.installAgentCommands'); }
+        });
     } catch (err: any) {
         outputLog.appendLine(`[Diff Review] register failed for ${target.id}: ${err.message}`);
         await copySnippet(target);
