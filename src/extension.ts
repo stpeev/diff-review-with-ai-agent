@@ -2552,7 +2552,7 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     for (const [uriStr, fileThreads] of byFile) {
         const uri = vscode.Uri.parse(uriStr);
         const rel = vscode.workspace.asRelativePath(uri);
-        parts.push(`## ${rel}\n`);
+        parts.push(`#### ${rel}\n`);
 
         // Get diff hunks for this file (once per file)
         const hunks = await getFileDiffHunks(uri);
@@ -2603,7 +2603,7 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
             const diffHunk = findRelevantHunk(hunks, line);
 
             const tid = threadIds.get(thread);
-            parts.push(tid !== undefined ? `### Line ${line} (Thread #${tid})` : `### Line ${line}`);
+            parts.push(tid !== undefined ? `#### Line ${line} (Thread #${tid})` : `#### Line ${line}`);
             if (codeContext) {
                 parts.push('```');
                 parts.push(codeContext);
