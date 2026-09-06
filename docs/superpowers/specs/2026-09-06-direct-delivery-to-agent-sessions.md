@@ -140,11 +140,13 @@ interface AgentSession {
 }
 ```
 
-Registration is idempotent on `sessionId`. Entries are pruned when a
-`SessionEnd` hook fires (both agents have one), when the MCP server's stdio
-closes, or lazily on read when liveness fails: for Claude, `pid` gone or socket
-unconnectable; for Codex, thread missing or `archived` in
-`~/.codex/state_5.sqlite`.
+Registration is idempotent on `sessionId`. Pruning is **liveness-based and needs
+no cooperation from the agent**: an entry drops when the MCP server's stdio
+closes, or lazily on read when a liveness check fails — for Claude, `pid` gone or
+socket unconnectable; for Codex, thread missing or `archived` in
+`~/.codex/state_5.sqlite`. A `SessionEnd` hook would make this prompt rather than
+lazy, but it is an optimisation, not a dependency, and it requires the installer
+specified in `2026-09-06-agent-hook-installation.md`. v1 does not rely on it.
 
 The roster lives in memory in the extension host, rebuilt by registration. It is
 not persisted — a session that outlives a window reload re-registers on its next
@@ -245,18 +247,43 @@ schema-drift cost.
 Both are agent-agnostic and survive any private-protocol breakage. They are the
 floor the whole design rests on, not an afterthought.
 
-**`diffReview_awaitReview` MCP tool.** Blocks up to ~55s and returns the moment
-Send is pressed, otherwise returns "nothing yet, call again". An agent parked in
-this loop receives the review with no push channel at all. Works for every
-MCP-capable agent, including the panel runtimes that F3/F4 cannot otherwise
-reach. The `/perform-diff-review` and `/address-diff-review` slash commands
-already installed by `diffReview.installAgentCommands` are the natural place to
-put the loop.
+**`diffReview_awaitReview` MCP tool.** Blocks and returns the moment Send is
+pressed, otherwise returns "nothing yet, call again". An agent parked in this
+loop receives the review with no push channel at all. Works for every MCP-capable
+agent, including the panel runtimes that F3/F4 cannot otherwise reach. The
+`/perform-diff-review` and `/address-diff-review` slash commands already
+installed by `diffReview.installAgentCommands` are the natural place to put the
+loop.
+
+*How long it may block is a contract, not a guess.* Claude documents its
+per-call limit as a "Hard wall-clock limit per call; **progress notifications do
+not extend it**", so the usual keep-alive-by-progress trick is unavailable and
+the tool must return on its own before the limit. Both agents expose a
+per-server override, in files `mcp-consumers.ts` already writes:
+
+| Agent | File | Field | Unit |
+|---|---|---|---|
+| Claude Code | `~/.claude.json` | `mcpServers["diff-review"].timeout` | ms |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.diff-review] tool_timeout_sec` | s |
+
+So registration sets the value explicitly rather than inheriting an unknown
+default, and `awaitReview` polls at a fixed fraction of it (proposed: write 60s,
+return at 45s). Writing these fields is an extension of the existing writers in
+`mcp-consumers.ts`, not new machinery. The tool must also cope with a user whose
+config predates this and carries no override — hence returning well short of the
+written value rather than at it.
 
 **A blocking `Stop` hook.** Verified present with identical semantics in both
 binaries (`Stop hook feedback:` in `claude`; `hooks/src/events/stop.rs` in
 `codex`). Returning `{"decision":"block","reason":"..."}` re-injects text and
 forces the agent to continue. This catches the agent exactly as it goes idle.
+
+Neither this hook nor the `SessionEnd` hook F1 uses is installed by anything
+today. Getting them onto a user's machine is a separate piece of work of
+comparable size to MCP registration, specified in
+`2026-09-06-agent-hook-installation.md`. **F5's Stop half and F1's hook-based
+pruning are blocked on that spec**; the `awaitReview` half and F1's
+liveness-based pruning are not, and are what v1 should rest on.
 
 F5 covers "agent is waiting"; F3/F4 cover "agent is idle or mid-turn". Together
 they cover every state.
@@ -273,6 +300,41 @@ One ordered path, evaluated per send, so the button never silently does nothing:
 4. Otherwise → clipboard, as today.
 
 Steps 3 and 4 are the current behaviour and must not regress.
+
+## Trust boundary
+
+This feature moves an agent's own auth token across a process boundary and then
+uses it to inject text the agent will act on. That deserves stating explicitly
+rather than being left implicit in F1 and F3.
+
+**What is being trusted.** `POST /session/register` carries a
+`CLAUDE_CODE_MESSAGING_TOKEN` and a socket path. The IPC server listens on
+`127.0.0.1`, so any local process can call it, and a bogus registration would put
+an attacker-chosen socket in the roster — at which point pressing Send writes the
+poke text to *their* socket instead of the agent's. The poke is not secret (it is
+"go read the comments"), so the exposure is misdirection rather than disclosure;
+the real cost is a review that silently goes nowhere.
+
+**Mitigations, in order of value:**
+
+1. Reuse the existing workspace check. The IPC server already answers 409 on a
+   workspace mismatch; registration gets the same treatment, so a registration
+   whose `cwd` is outside this window's roots is refused.
+2. Verify rather than believe. Every field a registrant asserts is checkable
+   locally: `pid` must exist, `socketPath` must match
+   `^/tmp/cc-socks(-<uid>)?/<pid>\.sock$` and be owned by the current uid,
+   `sessionId` must match `~/.claude/sessions/<pid>.json`. Registration supplies
+   convenience, not authority — a registration that fails these checks is
+   dropped.
+3. Treat the token as a secret in transit and at rest-in-memory. Never log it,
+   never include it in `Show MCP Server Info` output, never write it to the
+   comment store or to `workspaceState`. The roster is memory-only (F1) partly
+   for this reason.
+
+**What is explicitly not defended against.** A hostile process running as the
+same user already has the tokens — it can read `~/.claude/sessions/*.key` (mode
+600, same uid) directly. This design does not weaken that boundary, and does not
+try to defend it.
 
 ## Open decisions
 
@@ -308,6 +370,9 @@ Steps 3 and 4 are the current behaviour and must not regress.
 | 9 | F6 ladder | Force each rung; confirm no send is ever silently dropped. |
 | 10 | No regression | With no agent session registered, confirm Copilot and clipboard paths behave exactly as before. |
 | 11 | `codex` binary resolution | With `codex` absent from `PATH`, confirm the extension-root scan finds it; then bump the ChatGPT extension version and confirm it still resolves. |
+| 12 | Timeout contract | Confirm registration writes `timeout` / `tool_timeout_sec`, and that `awaitReview` returns before the limit on a client that has *no* override written. |
+| 13 | Registration is verified, not believed | POST a registration with a foreign `cwd`, a dead `pid`, and a socket path outside `/tmp/cc-socks`; each must be refused. |
+| 14 | Token never leaks | Grep logs, `Show MCP Server Info` output, the comment store and `workspaceState` for the messaging token after a full send cycle. |
 
 Checks 1–4 need real agent processes and cannot be unit-tested. Checks 5–7 and 9
 should be unit-testable against a pure roster/binding module in the style of
@@ -327,6 +392,9 @@ should be unit-testable against a pure roster/binding module in the style of
   the F2 picker and `workspaceState` binding, and the changed `sendThread` /
   `submitAll` paths.
 - `src/slash-commands.ts` — add the `awaitReview` loop to the installed prompts.
+- `src/mcp-consumers.ts` — write the per-server tool timeout alongside the
+  existing entry (`timeout` for `claude-json`, `tool_timeout_sec` for
+  `codex-toml`).
 - `package.json` — the `diffReview_awaitReview` language model tool, the
   `diffReview.experimentalDirectDelivery` setting, and a re-target command.
 - `test/agent-roster.test.js` — **new.** Covers checks 5–7 and 9.
