@@ -82,6 +82,11 @@
         "icon": "$(trash)"
       },
       {
+        "command": "diffReview.deleteThread",
+        "title": "Delete Thread",
+        "icon": "$(trash)"
+      },
+      {
         "command": "diffReview.sendThread",
         "title": "Send to Copilot",
         "icon": "$(send)"
@@ -215,6 +220,11 @@
           "command": "diffReview.fixDriftedLocation",
           "when": "commentController == diffReview && (commentThread == drifted-open || commentThread == drifted-resolved)",
           "group": "inline@3"
+        },
+        {
+          "command": "diffReview.deleteThread",
+          "group": "inline@4",
+          "when": "commentController == diffReview && !commentThreadIsEmpty"
         }
       ],
       "commandPalette": [

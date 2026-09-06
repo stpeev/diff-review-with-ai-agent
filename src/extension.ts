@@ -1612,6 +1612,30 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // --- Delete whole thread ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.deleteThread', async (thread: vscode.CommentThread) => {
+            if (!thread) return;
+            const count = thread.comments.length;
+            if (count > 1) {
+                const pick = await vscode.window.showWarningMessage(
+                    `Delete this comment thread and all ${count} comments in it?`,
+                    { modal: true },
+                    'Delete'
+                );
+                if (pick !== 'Delete') return;
+            }
+            const uri = thread.uri;
+            const tid = threadIds.get(thread);
+            const gid = ghostIdOf(thread);
+            if (gid !== undefined) dropDrifted(gid);
+            else { untrackThread(thread); thread.dispose(); }
+            outputLog.appendLine(`[Diff Review] Comment #${gid ?? tid} deleted (whole thread, ${count} comment(s)) at ${vscode.workspace.asRelativePath(uri)}`);
+            refresh();
+            queueSaveForUri(uri);
+        })
+    );
+
     // --- Send single thread to Copilot ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.sendThread', async (thread: vscode.CommentThread) => {
