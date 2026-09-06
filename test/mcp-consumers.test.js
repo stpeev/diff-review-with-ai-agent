@@ -4,7 +4,7 @@ const {
     inspectVsCodeJson, writeVsCodeJson,
     inspectCodexToml, writeCodexToml,
     inspectClaudeJson, writeClaudeJson,
-} = require('../out/mcp-consumers');
+} = require('../out/test/mcp-consumers');
 
 const LAUNCHER = '/Users/tester/.diff-review/mcp-launcher.js';
 
@@ -173,7 +173,7 @@ test('claude: a non-object root is not writable', () => {
 
 // --------------- VS Code profiles ---------------
 
-const { parseProfiles } = require('../out/mcp-consumers');
+const { parseProfiles } = require('../out/test/mcp-consumers');
 
 test('profiles: only profiles with their own mcp config are listed', () => {
     const storage = JSON.stringify({

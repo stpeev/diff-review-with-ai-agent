@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
-const { resolveWithinRoot } = require('../out/path-util');
+const { resolveWithinRoot } = require('../out/test/path-util');
 
 test('resolveWithinRoot joins a plain relative path onto the root', () => {
     const result = resolveWithinRoot('/repo', 'src/foo.ts');

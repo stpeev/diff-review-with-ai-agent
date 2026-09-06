@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { readText, backup } = require('../out/file-write');
+const { readText, backup } = require('../out/test/file-write');
 
 function tmpDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'diff-review-file-write-'));

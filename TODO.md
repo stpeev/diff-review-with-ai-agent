@@ -6,7 +6,6 @@
 - [ ] F6 (soft-delete + `Diff Review: Restore Deleted Comments`) and F7 (`Diff Review: Recover Comments` over stranded scopes) from `docs/superpowers/specs/2026-09-05-comment-storage-durability.md` — F1–F5 are implemented, these two are not
 - [ ] `myWorkspaceRoots` (used for the IPC 409 workspace-mismatch check) is captured once at IPC server startup — adding/removing a workspace folder mid-session doesn't refresh it
 - [ ] Manual/E2E verification of F1–F5 per the spec's Verification table — two real windows, a branch switch across two repos, drift discovery via an actual `git checkout`/rename, the re-attach flow, MCP end-to-end. Unit tests cover the pure modules and one integration smoke test covers the real IPC descriptor/ping glue, but nothing here has exercised the actual `vscode.CommentThread`/UI paths yet.
-- [ ] Manual `npm run sandbox` walkthrough of `Diff Review: Install the Diff Review Agent Commands` per `docs/superpowers/plans/2026-09-06-agent-slash-command.md`'s Plan-Level Verification — install into Claude Code, run `/perform-diff-review` on a branch with a real change, confirm the threads land in the gutter, then run `/address-diff-review` and confirm the replies/resolutions land back. `src/slash-commands.ts`'s pure logic is fully unit-tested; the quick pick UI in `extension.ts` is not (same gap as the rest of that file, see above).
 
 
 # DONE

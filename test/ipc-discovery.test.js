@@ -5,7 +5,7 @@ const {
     descriptorDir, descriptorFileName, descriptorPath,
     deepestMatch, resolvePort,
     NoServerError, AmbiguousPortError,
-} = require('../out/ipc-discovery');
+} = require('../out/test/ipc-discovery');
 
 // --------------- Descriptor paths ---------------
 

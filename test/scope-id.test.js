@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const {
     normalizeRemoteUrl, scopeIdForRemote, scopeIdForRepo, scopeIdForFolder,
     scopeDirName, deepestScopeForFile,
-} = require('../out/scope-id');
+} = require('../out/test/scope-id');
 
 // --------------- normalizeRemoteUrl ---------------
 

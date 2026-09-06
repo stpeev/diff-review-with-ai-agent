@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseProfiles, userDataRoot, VSCODE_APPS } = require('../out/vscode-profiles');
+const { parseProfiles, userDataRoot, VSCODE_APPS } = require('../out/test/vscode-profiles');
 
 test('parseProfiles: null input yields no profiles', () => {
     assert.deepStrictEqual(parseProfiles(null), []);

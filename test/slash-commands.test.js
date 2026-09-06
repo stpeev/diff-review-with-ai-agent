@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { renderBody, MARKER, INVOCATION } = require('../out/slash-commands');
+const { renderBody, MARKER, INVOCATION } = require('../out/test/slash-commands');
 
 test('INVOCATION: the two commands', () => {
     assert.strictEqual(INVOCATION.perform, '/perform-diff-review');
@@ -84,7 +84,7 @@ test('renderBody: address instructs never to commit', () => {
 test('renderBody: gemini-toml escapes a literal """ in the body', () => {
     // The authored bodies never contain a literal triple-quote today; this
     // guards the escaping logic itself rather than current content.
-    const { __escapeTomlMultilineStringForTest } = require('../out/slash-commands');
+    const { __escapeTomlMultilineStringForTest } = require('../out/test/slash-commands');
     const escaped = __escapeTomlMultilineStringForTest('before """ after \\ done');
     assert.ok(!escaped.includes('"""'));
     assert.match(escaped, /\\\\/);
@@ -95,7 +95,7 @@ test('renderBody: gemini-toml escapes a literal """ in the body', () => {
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { discoverSlashCommands } = require('../out/slash-commands');
+const { discoverSlashCommands } = require('../out/test/slash-commands');
 
 function tmpHome() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'diff-review-slash-'));
@@ -142,7 +142,7 @@ test('discoverSlashCommands: a fully current file is status current and writable
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/slash-commands').renderBody('claude-md', 'perform'));
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/test/slash-commands').renderBody('claude-md', 'perform'));
     const targets = discoverSlashCommands({ home, platform: 'linux' });
     const claude = targets.find(t => t.id === 'claude');
     const perform = claude.files.find(f => f.command === 'perform');
@@ -154,7 +154,7 @@ test('discoverSlashCommands: a stale file with our marker is writable', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    const { MARKER } = require('../out/slash-commands');
+    const { MARKER } = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), `${MARKER.perform}\nan older version\n`);
     const targets = discoverSlashCommands({ home, platform: 'linux' });
     const perform = targets.find(t => t.id === 'claude').files.find(f => f.command === 'perform');
@@ -178,7 +178,7 @@ test('discoverSlashCommands: row status is the worse of its two files (missing w
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/slash-commands').renderBody('claude-md', 'perform'));
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/test/slash-commands').renderBody('claude-md', 'perform'));
     // address-diff-review.md left missing.
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     assert.strictEqual(claude.status, 'missing');
@@ -188,7 +188,7 @@ test('discoverSlashCommands: row status is stale when one file is stale and the 
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    const sc = require('../out/slash-commands');
+    const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     fs.writeFileSync(path.join(dir, 'address-diff-review.md'), `${sc.MARKER.address}\nold\n`);
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
@@ -199,7 +199,7 @@ test('discoverSlashCommands: row status is current only when both files are', ()
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    const sc = require('../out/slash-commands');
+    const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     fs.writeFileSync(path.join(dir, 'address-diff-review.md'), sc.renderBody('claude-md', 'address'));
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
@@ -269,7 +269,7 @@ test('discoverSlashCommands: a profile directory that does not exist on disk pro
 
 // --------------- Clipboard rendering and writers ---------------
 
-const { renderClipboard, install } = require('../out/slash-commands');
+const { renderClipboard, install } = require('../out/test/slash-commands');
 
 test('renderClipboard: includes the body and a save-this-to line naming the path', () => {
     const home = tmpHome();
@@ -278,7 +278,7 @@ test('renderClipboard: includes the body and a save-this-to line naming the path
     const targets = discoverSlashCommands({ home, platform: 'linux' });
     const claude = targets.find(t => t.id === 'claude');
     const clip = renderClipboard(claude, 'perform');
-    assert.ok(clip.includes(require('../out/slash-commands').MARKER.perform));
+    assert.ok(clip.includes(require('../out/test/slash-commands').MARKER.perform));
     assert.match(clip, /Save this to: .*perform-diff-review\.md/);
 });
 
@@ -292,7 +292,7 @@ test('install: writes missing files and returns one result per file written', ()
     assert.strictEqual(outcome.errors.length, 0);
     assert.strictEqual(
         fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'),
-        require('../out/slash-commands').renderBody('claude-md', 'perform'),
+        require('../out/test/slash-commands').renderBody('claude-md', 'perform'),
     );
 });
 
@@ -300,7 +300,7 @@ test('install: skips a file that is already current', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    const sc = require('../out/slash-commands');
+    const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     const outcome = install(target);
@@ -312,7 +312,7 @@ test('install: backs up a stale-with-marker file before overwriting it', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
-    const sc = require('../out/slash-commands');
+    const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), `${sc.MARKER.perform}\nold body\n`);
     const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     const outcome = install(target);

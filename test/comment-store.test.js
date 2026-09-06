@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const {
     emptyBranch, emptyScopeFile, mergeScopeFiles,
     hashAnchor, anchorContextSnippet, findAnchorLine,
-} = require('../out/comment-store');
+} = require('../out/test/comment-store');
 
 function thread(id, updatedAt, overrides) {
     return Object.assign({
