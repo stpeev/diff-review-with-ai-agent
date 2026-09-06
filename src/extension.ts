@@ -147,6 +147,7 @@ function driftedPreview(rec: DriftedRecord): string {
 function resolveThread(thread: vscode.CommentThread) {
     thread.label = '✅ Resolved';
     thread.contextValue = 'resolved';
+    thread.state = vscode.CommentThreadState.Resolved;
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     touchThread(thread);
 }
@@ -154,6 +155,7 @@ function resolveThread(thread: vscode.CommentThread) {
 function unresolveThread(thread: vscode.CommentThread) {
     thread.label = 'Open';
     thread.contextValue = 'open';
+    thread.state = vscode.CommentThreadState.Unresolved;
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     touchThread(thread);
 }
@@ -628,10 +630,12 @@ function instantiateThread(folder: FolderInfo, st: SerializedThread) {
     if (st.status === 'resolved') {
         thread.label = '✅ Resolved';
         thread.contextValue = 'resolved';
+        thread.state = vscode.CommentThreadState.Resolved;
         thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     } else {
         thread.label = 'Open';
         thread.contextValue = 'open';
+        thread.state = vscode.CommentThreadState.Unresolved;
         thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     }
     trackThread(thread, st.id, { anchorHash: st.anchorHash, anchorContext: st.anchorContext, updatedAt: st.updatedAt });
@@ -1398,6 +1402,7 @@ export function activate(context: vscode.ExtensionContext) {
             thread.canReply = true;
             thread.label = 'Open';
             thread.contextValue = 'open';
+            thread.state = vscode.CommentThreadState.Unresolved;
             const anchor = computeAnchorForNewThread(thread);
             const tid = trackThread(thread, undefined, anchor);
             outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
@@ -1744,6 +1749,7 @@ function createCommentThreadAt(uri: vscode.Uri, startLine0: number, endLine0: nu
     thread.canReply = true;
     thread.label = 'Open';
     thread.contextValue = 'open';
+    thread.state = vscode.CommentThreadState.Unresolved;
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     const anchor = computeAnchorForNewThread(thread);
     const tid = trackThread(thread, undefined, anchor);
@@ -2387,9 +2393,11 @@ function finishReattach(id: number, uri: vscode.Uri, line: number) {
     thread.canReply = true;
     if (rec.status === 'resolved') {
         thread.label = '✅ Resolved'; thread.contextValue = 'resolved';
+        thread.state = vscode.CommentThreadState.Resolved;
         thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     } else {
         thread.label = 'Open'; thread.contextValue = 'open';
+        thread.state = vscode.CommentThreadState.Unresolved;
         thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     }
     trackThread(thread, id, anchor);
@@ -2410,6 +2418,7 @@ async function keepDriftedAsFileNote(id: number) {
     thread.canReply = true;
     thread.label = rec.status === 'resolved' ? '✅ Resolved (file note)' : 'Open (file note)';
     thread.contextValue = rec.status === 'resolved' ? 'resolved' : 'open';
+    thread.state = rec.status === 'resolved' ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     trackThread(thread, id); // no anchor — this thread is intentionally exempt from future drift checks
     driftedMap.delete(id);
