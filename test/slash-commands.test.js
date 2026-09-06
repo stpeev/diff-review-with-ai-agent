@@ -266,3 +266,106 @@ test('discoverSlashCommands: a profile directory that does not exist on disk pro
     const targets = discoverSlashCommands({ home, platform: 'darwin' });
     assert.strictEqual(targets.find(t => t.id === 'vscode:profile:ghost'), undefined);
 });
+
+// --------------- Clipboard rendering and writers ---------------
+
+const { renderClipboard, install } = require('../out/slash-commands');
+
+test('renderClipboard: includes the body and a save-this-to line naming the path', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const targets = discoverSlashCommands({ home, platform: 'linux' });
+    const claude = targets.find(t => t.id === 'claude');
+    const clip = renderClipboard(claude, 'perform');
+    assert.ok(clip.includes(require('../out/slash-commands').MARKER.perform));
+    assert.match(clip, /Save this to: .*perform-diff-review\.md/);
+});
+
+test('install: writes missing files and returns one result per file written', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    const outcome = install(target);
+    assert.strictEqual(outcome.written.length, 2);
+    assert.strictEqual(outcome.errors.length, 0);
+    assert.strictEqual(
+        fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'),
+        require('../out/slash-commands').renderBody('claude-md', 'perform'),
+    );
+});
+
+test('install: skips a file that is already current', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const sc = require('../out/slash-commands');
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
+    const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    const outcome = install(target);
+    assert.strictEqual(outcome.written.length, 1); // only address-diff-review.md
+    assert.strictEqual(outcome.written[0].command, 'address');
+});
+
+test('install: backs up a stale-with-marker file before overwriting it', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const sc = require('../out/slash-commands');
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), `${sc.MARKER.perform}\nold body\n`);
+    const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    const outcome = install(target);
+    const result = outcome.written.find(w => w.command === 'perform');
+    assert.ok(result.backup);
+    assert.strictEqual(fs.readFileSync(result.backup, 'utf-8'), `${sc.MARKER.perform}\nold body\n`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'), sc.renderBody('claude-md', 'perform'));
+});
+
+test('install: never touches a stale-without-marker file', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), 'hand written, not ours\n');
+    const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    const outcome = install(target);
+    assert.strictEqual(outcome.written.find(w => w.command === 'perform'), undefined);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'), 'hand written, not ours\n');
+});
+
+test('install: a write failure on one file is reported without blocking the other', () => {
+    const home = tmpHome();
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(dir, { recursive: true });
+    const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
+    // Force perform-diff-review.md's write to fail: pre-create it as a
+    // directory, which writeFileSync cannot write into.
+    fs.mkdirSync(path.join(dir, 'perform-diff-review.md'));
+    const outcome = install(target);
+    assert.strictEqual(outcome.errors.length, 1);
+    assert.strictEqual(outcome.errors[0].command, 'perform');
+    assert.strictEqual(outcome.written.length, 1);
+    assert.strictEqual(outcome.written[0].command, 'address');
+});
+
+test('install: creates the parent directory when it does not exist yet', () => {
+    const home = tmpHome();
+    // ~/.claude exists but .../commands does not -- discoverSlashCommands
+    // requires the commands dir itself to exist to produce a row, so build a
+    // target by hand for this case instead (a VS Code profile's prompts/
+    // subdirectory is exactly this situation in real use).
+    const dir = path.join(home, '.claude', 'commands');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true }); // parent only
+    const target = {
+        id: 'claude', label: 'Claude Code', kind: 'claude-md', dirPath: dir,
+        files: [
+            { command: 'perform', filePath: path.join(dir, 'perform-diff-review.md'), invocation: '/perform-diff-review', status: 'missing', writable: true },
+            { command: 'address', filePath: path.join(dir, 'address-diff-review.md'), invocation: '/address-diff-review', status: 'missing', writable: true },
+        ],
+        status: 'missing', writable: true,
+    };
+    const outcome = install(target);
+    assert.strictEqual(outcome.errors.length, 0);
+    assert.strictEqual(outcome.written.length, 2);
+    assert.ok(fs.existsSync(path.join(dir, 'perform-diff-review.md')));
+});

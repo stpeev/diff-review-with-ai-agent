@@ -323,6 +323,52 @@ export function discoverSlashCommands(env: DiscoveryEnv = {}): SlashCommandTarge
     return targets;
 }
 
+// --------------- Clipboard rendering and writers ---------------
+
+import { backup } from './file-write';
+
+/** What lands on the clipboard: the body, plus where to save it. */
+export function renderClipboard(target: SlashCommandTarget, command: CommandId): string {
+    const file = target.files.find(f => f.command === command)!;
+    return `${renderBody(target.kind, command)}\n---\nSave this to: ${file.filePath}\n`;
+}
+
+export interface SlashWriteResult {
+    command: CommandId;
+    filePath: string;
+    /** The backup taken before overwriting a stale file, when there was one. */
+    backup?: string;
+}
+
+export interface InstallOutcome {
+    written: SlashWriteResult[];
+    errors: { command: CommandId; filePath: string; message: string }[];
+}
+
+/**
+ * Write every file in `target` that is writable and not already current.
+ * A failure writing one file does not stop the other from being attempted;
+ * both successes and failures are reported so the caller can show both.
+ */
+export function install(target: SlashCommandTarget): InstallOutcome {
+    const written: SlashWriteResult[] = [];
+    const errors: InstallOutcome['errors'] = [];
+
+    for (const file of target.files) {
+        if (!file.writable || file.status === 'current') continue;
+        try {
+            const savedBackup = backup(file.filePath);
+            fs.mkdirSync(path.dirname(file.filePath), { recursive: true });
+            fs.writeFileSync(file.filePath, renderBody(target.kind, file.command), 'utf-8');
+            written.push({ command: file.command, filePath: file.filePath, backup: savedBackup });
+        } catch (e: any) {
+            errors.push({ command: file.command, filePath: file.filePath, message: e.message });
+        }
+    }
+
+    return { written, errors };
+}
+
 // Exported for test/slash-commands.test.js only — not part of the module's
 // real surface, but the escaping logic is worth a direct unit test since the
 // authored bodies never exercise the case it guards against.
