@@ -3,8 +3,7 @@ const assert = require('node:assert');
 const {
     emptyBranch, emptyScopeFile, mergeScopeFiles,
     hashAnchor, anchorContextSnippet, findAnchorLine,
-    serializeComments, ghostContextValue, statusOfContextValue, isGhostContextValue,
-    ghostLabel, applyGhostEdit,
+    serializeComments, statusOfContextValue, isDriftedContextValue, presentationFor,
 } = require('../out/test/comment-store');
 
 function thread(id, updatedAt, overrides) {
@@ -123,7 +122,7 @@ test('findAnchorLine: context radius matters — same line text with different s
     assert.strictEqual(findAnchorLine(decoy, hash, 1, 1, 50), undefined);
 });
 
-// --------------- Ghost (drifted-but-visible) threads ---------------
+// --------------- Thread presentation ---------------
 
 test('serializeComments maps live comments to their persisted shape', () => {
     const out = serializeComments([
@@ -136,9 +135,11 @@ test('serializeComments maps live comments to their persisted shape', () => {
     ]);
 });
 
-test('ghost context values round-trip through status', () => {
-    assert.strictEqual(ghostContextValue('open'), 'drifted-open');
-    assert.strictEqual(ghostContextValue('resolved'), 'drifted-resolved');
+test('context values round-trip through status', () => {
+    assert.strictEqual(presentationFor({ status: 'open', lastKnownLine: 5 }).contextValue, 'drifted-open');
+    assert.strictEqual(presentationFor({ status: 'resolved', lastKnownLine: 5 }).contextValue, 'drifted-resolved');
+    assert.strictEqual(presentationFor({ status: 'open' }).contextValue, 'open');
+    assert.strictEqual(presentationFor({ status: 'resolved' }).contextValue, 'resolved');
     assert.strictEqual(statusOfContextValue('drifted-open'), 'open');
     assert.strictEqual(statusOfContextValue('drifted-resolved'), 'resolved');
     assert.strictEqual(statusOfContextValue('resolved'), 'resolved');
@@ -146,55 +147,57 @@ test('ghost context values round-trip through status', () => {
     assert.strictEqual(statusOfContextValue(undefined), 'open');
 });
 
-test('isGhostContextValue distinguishes ghosts from live threads', () => {
-    assert.ok(isGhostContextValue('drifted-open'));
-    assert.ok(isGhostContextValue('drifted-resolved'));
-    assert.ok(!isGhostContextValue('open'));
-    assert.ok(!isGhostContextValue('resolved'));
-    assert.ok(!isGhostContextValue(undefined));
+test('isDriftedContextValue distinguishes drifted threads from live ones', () => {
+    assert.ok(isDriftedContextValue('drifted-open'));
+    assert.ok(isDriftedContextValue('drifted-resolved'));
+    assert.ok(!isDriftedContextValue('open'));
+    assert.ok(!isDriftedContextValue('resolved'));
+    assert.ok(!isDriftedContextValue(undefined));
 });
 
-test('ghostLabel names the line the comment was last seen on, 1-based', () => {
-    assert.strictEqual(ghostLabel(0, 'open'), '⚠ Moved — anchor not found (was L1)');
-    assert.strictEqual(ghostLabel(62, 'open'), '⚠ Moved — anchor not found (was L63)');
+test('a drifted label names the line the comment was last seen on, 1-based', () => {
+    assert.strictEqual(presentationFor({ status: 'open', lastKnownLine: 0 }).label, '⚠ Moved — anchor not found (was L1)');
+    assert.strictEqual(presentationFor({ status: 'open', lastKnownLine: 62 }).label, '⚠ Moved — anchor not found (was L63)');
 });
 
-test('ghostLabel marks a resolved drifted comment as resolved', () => {
-    assert.strictEqual(ghostLabel(62, 'resolved'), '✅ Resolved · ⚠ Moved (was L63)');
+test('a resolved drifted comment is labelled resolved and moved', () => {
+    assert.strictEqual(presentationFor({ status: 'resolved', lastKnownLine: 62 }).label, '✅ Resolved · ⚠ Moved (was L63)');
 });
 
-test('applyGhostEdit writes a reply back into the drifted record', () => {
-    const rec = {
-        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
-        comments: [{ id: 1, role: 'user', body: 'hi', timestamp: '2026-01-01T00:00:00Z' }],
-        updatedAt: '2026-01-01T00:00:00Z',
-    };
-    applyGhostEdit(rec, [
-        { id: 1, role: 'user', body: 'hi', createdAt: '2026-01-01T00:00:00Z' },
-        { id: 2, role: 'agent', body: 'answered', createdAt: '2026-01-03T00:00:00Z' },
-    ], 'drifted-open', '2026-01-03T00:00:00Z');
-
-    assert.strictEqual(rec.comments.length, 2);
-    assert.deepStrictEqual(rec.comments[1], { id: 2, role: 'agent', body: 'answered', timestamp: '2026-01-03T00:00:00Z' });
-    assert.strictEqual(rec.status, 'open');
-    assert.strictEqual(rec.updatedAt, '2026-01-03T00:00:00Z');
+test('live threads keep their plain labels', () => {
+    assert.strictEqual(presentationFor({ status: 'open' }).label, 'Open');
+    assert.strictEqual(presentationFor({ status: 'resolved' }).label, '✅ Resolved');
 });
 
-test('applyGhostEdit writes a resolve back into the drifted record', () => {
-    const rec = {
-        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
-        comments: [{ id: 1, role: 'user', body: 'hi', timestamp: '2026-01-01T00:00:00Z' }],
-        updatedAt: '2026-01-01T00:00:00Z',
-    };
-    applyGhostEdit(rec, [{ id: 1, role: 'user', body: 'hi', createdAt: '2026-01-01T00:00:00Z' }], 'drifted-resolved', '2026-01-04T00:00:00Z');
-    assert.strictEqual(rec.status, 'resolved');
+test('file notes are labelled as such, drift-free', () => {
+    assert.strictEqual(presentationFor({ status: 'open', fileNote: true }).label, 'Open (file note)');
+    assert.strictEqual(presentationFor({ status: 'resolved', fileNote: true }).label, '✅ Resolved (file note)');
+    assert.strictEqual(presentationFor({ status: 'open', fileNote: true }).contextValue, 'open');
 });
 
-test('applyGhostEdit leaves the untrusted position untouched', () => {
-    const rec = {
-        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
-        comments: [], updatedAt: '2026-01-01T00:00:00Z',
-    };
-    applyGhostEdit(rec, [], 'drifted-open', '2026-01-05T00:00:00Z');
-    assert.strictEqual(rec.lastKnownLine, 62);
+test('drift wins over fileNote in the label', () => {
+    // A file note that later drifts must read as drifted: the drift is the
+    // actionable fact, and its contextValue is what the guards check.
+    const p = presentationFor({ status: 'open', fileNote: true, lastKnownLine: 4 });
+    assert.strictEqual(p.contextValue, 'drifted-open');
+    assert.strictEqual(p.label, '⚠ Moved — anchor not found (was L5)');
+});
+
+test('only a live open comment stays expanded', () => {
+    assert.strictEqual(presentationFor({ status: 'open' }).collapsed, false);
+    assert.strictEqual(presentationFor({ status: 'resolved' }).collapsed, true);
+    assert.strictEqual(presentationFor({ status: 'open', lastKnownLine: 1 }).collapsed, true);
+    assert.strictEqual(presentationFor({ status: 'resolved', lastKnownLine: 1 }).collapsed, true);
+    assert.strictEqual(presentationFor({ status: 'open', fileNote: true }).collapsed, true);
+});
+
+test('resolved flag tracks status across every variant', () => {
+    assert.strictEqual(presentationFor({ status: 'resolved', lastKnownLine: 1 }).resolved, true);
+    assert.strictEqual(presentationFor({ status: 'open', lastKnownLine: 1 }).resolved, false);
+    assert.strictEqual(presentationFor({ status: 'resolved', fileNote: true }).resolved, true);
+});
+
+test('line 0 drift is presented as drifted, not as an absent anchor', () => {
+    // Guards against a `lastKnownLine ? ...` truthiness bug: line 0 is a real line.
+    assert.ok(isDriftedContextValue(presentationFor({ status: 'open', lastKnownLine: 0 }).contextValue));
 });
