@@ -3,6 +3,8 @@ const assert = require('node:assert');
 const {
     emptyBranch, emptyScopeFile, mergeScopeFiles,
     hashAnchor, anchorContextSnippet, findAnchorLine,
+    serializeComments, ghostContextValue, statusOfContextValue, isGhostContextValue,
+    ghostLabel, applyGhostEdit,
 } = require('../out/test/comment-store');
 
 function thread(id, updatedAt, overrides) {
@@ -119,4 +121,80 @@ test('findAnchorLine: context radius matters — same line text with different s
     const hash = hashAnchor('DUPLICATE', anchorContextSnippet(original, 1, 1).split('\n'));
     const decoy = ['other-a', 'DUPLICATE', 'other-b']; // same line text, different context
     assert.strictEqual(findAnchorLine(decoy, hash, 1, 1, 50), undefined);
+});
+
+// --------------- Ghost (drifted-but-visible) threads ---------------
+
+test('serializeComments maps live comments to their persisted shape', () => {
+    const out = serializeComments([
+        { id: 3, role: 'user', body: 'plain string body', createdAt: '2026-01-01T00:00:00Z' },
+        { id: 4, role: 'agent', body: { value: 'markdown body' }, createdAt: '2026-01-02T00:00:00Z' },
+    ]);
+    assert.deepStrictEqual(out, [
+        { id: 3, role: 'user', body: 'plain string body', timestamp: '2026-01-01T00:00:00Z' },
+        { id: 4, role: 'agent', body: 'markdown body', timestamp: '2026-01-02T00:00:00Z' },
+    ]);
+});
+
+test('ghost context values round-trip through status', () => {
+    assert.strictEqual(ghostContextValue('open'), 'drifted-open');
+    assert.strictEqual(ghostContextValue('resolved'), 'drifted-resolved');
+    assert.strictEqual(statusOfContextValue('drifted-open'), 'open');
+    assert.strictEqual(statusOfContextValue('drifted-resolved'), 'resolved');
+    assert.strictEqual(statusOfContextValue('resolved'), 'resolved');
+    assert.strictEqual(statusOfContextValue('open'), 'open');
+    assert.strictEqual(statusOfContextValue(undefined), 'open');
+});
+
+test('isGhostContextValue distinguishes ghosts from live threads', () => {
+    assert.ok(isGhostContextValue('drifted-open'));
+    assert.ok(isGhostContextValue('drifted-resolved'));
+    assert.ok(!isGhostContextValue('open'));
+    assert.ok(!isGhostContextValue('resolved'));
+    assert.ok(!isGhostContextValue(undefined));
+});
+
+test('ghostLabel names the line the comment was last seen on, 1-based', () => {
+    assert.strictEqual(ghostLabel(0, 'open'), '⚠ Moved — anchor not found (was L1)');
+    assert.strictEqual(ghostLabel(62, 'open'), '⚠ Moved — anchor not found (was L63)');
+});
+
+test('ghostLabel marks a resolved drifted comment as resolved', () => {
+    assert.strictEqual(ghostLabel(62, 'resolved'), '✅ Resolved · ⚠ Moved (was L63)');
+});
+
+test('applyGhostEdit writes a reply back into the drifted record', () => {
+    const rec = {
+        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
+        comments: [{ id: 1, role: 'user', body: 'hi', timestamp: '2026-01-01T00:00:00Z' }],
+        updatedAt: '2026-01-01T00:00:00Z',
+    };
+    applyGhostEdit(rec, [
+        { id: 1, role: 'user', body: 'hi', createdAt: '2026-01-01T00:00:00Z' },
+        { id: 2, role: 'agent', body: 'answered', createdAt: '2026-01-03T00:00:00Z' },
+    ], 'drifted-open', '2026-01-03T00:00:00Z');
+
+    assert.strictEqual(rec.comments.length, 2);
+    assert.deepStrictEqual(rec.comments[1], { id: 2, role: 'agent', body: 'answered', timestamp: '2026-01-03T00:00:00Z' });
+    assert.strictEqual(rec.status, 'open');
+    assert.strictEqual(rec.updatedAt, '2026-01-03T00:00:00Z');
+});
+
+test('applyGhostEdit writes a resolve back into the drifted record', () => {
+    const rec = {
+        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
+        comments: [{ id: 1, role: 'user', body: 'hi', timestamp: '2026-01-01T00:00:00Z' }],
+        updatedAt: '2026-01-01T00:00:00Z',
+    };
+    applyGhostEdit(rec, [{ id: 1, role: 'user', body: 'hi', createdAt: '2026-01-01T00:00:00Z' }], 'drifted-resolved', '2026-01-04T00:00:00Z');
+    assert.strictEqual(rec.status, 'resolved');
+});
+
+test('applyGhostEdit leaves the untrusted position untouched', () => {
+    const rec = {
+        id: 7, uri: 'file:///a.ts', lastKnownLine: 62, status: 'open',
+        comments: [], updatedAt: '2026-01-01T00:00:00Z',
+    };
+    applyGhostEdit(rec, [], 'drifted-open', '2026-01-05T00:00:00Z');
+    assert.strictEqual(rec.lastKnownLine, 62);
 });

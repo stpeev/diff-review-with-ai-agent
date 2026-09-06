@@ -2,7 +2,7 @@
   "name": "diff-review",
   "displayName": "Diff Review with AI Agent",
   "description": "Inline code review comments — review AI-generated changes, submit feedback in batch to Copilot, Claude Code, or any AI agent, with git diff context",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "JinqiShen",
   "contributors": [
     {
@@ -95,6 +95,12 @@
         "command": "diffReview.unresolve",
         "title": "Reopen",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "diffReview.fixDriftedLocation",
+        "title": "Fix Location…",
+        "category": "Diff Review",
+        "icon": "$(target)"
       },
       {
         "command": "diffReview.showMcpInfo",
@@ -198,12 +204,23 @@
         {
           "command": "diffReview.resolve",
           "group": "inline@2",
-          "when": "commentController == diffReview && commentThread == open"
+          "when": "commentController == diffReview && (commentThread == open || commentThread == drifted-open)"
         },
         {
           "command": "diffReview.unresolve",
           "group": "inline@2",
-          "when": "commentController == diffReview && commentThread == resolved"
+          "when": "commentController == diffReview && (commentThread == resolved || commentThread == drifted-resolved)"
+        },
+        {
+          "command": "diffReview.fixDriftedLocation",
+          "when": "commentController == diffReview && (commentThread == drifted-open || commentThread == drifted-resolved)",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "diffReview.fixDriftedLocation",
+          "when": "false"
         }
       ]
     },

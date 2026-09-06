@@ -212,12 +212,21 @@ the file at once, which is exactly the moment the feature would feel worst.
 
 ### Drifted comments: UX
 
-A drifted thread has no trustworthy range, so it **leaves the gutter**. Leaving
-it in place at its last-known line is the current behavior and the bug — it
-presents the comment as if it still described that code.
+A drifted thread has no trustworthy range, so it **leaves the gutter** as a
+live thread. Leaving it in place at its last-known line, presented as if it
+still described that code, is the original behavior and the bug.
 
 It moves to the existing comment panel (`diffReview.showPanel`), under a
-**Needs re-attaching** section grouped by file. No new view is introduced; the
+**Needs re-attaching** section grouped by file.
+
+**Amended 2026-09-07.** Withholding the thread entirely proved to be its own
+bug: a drifted comment vanished from the Comments view, which is where users
+actually look, with only the status bar hinting that anything existed. A
+drifted record now also gets a *ghost* thread — shown at its last-known line,
+labelled `⚠ Moved — anchor not found (was L<n>)`, and deliberately excluded
+from `threadMap` so it is never line-shifted, re-verified or serialized as a
+live thread. Replying and resolving on a ghost write through to the drifted
+record; only re-attaching restores a trustworthy position. No new view is introduced; the
 panel already does search, grouping and per-item actions.
 
 Each drifted entry shows the comment text and the **stored anchor snippet** —
