@@ -11,6 +11,7 @@ import {
     discoverSlashCommands, renderClipboard, install, INVOCATION,
 } from './slash-commands';
 import { isAncestor, resolveWithinRoot } from './path-util';
+import { LM_TOOLS, prosePolicy } from './review-policy';
 import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
@@ -2674,15 +2675,10 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     }
 
     parts.push('---');
-    parts.push('Each comment heading carries its thread ID as "(Thread #N)"; use that N as threadId below.');
-    parts.push('Read the full thread and surrounding context. Determine whether the comment requests a discussion, ' +
-        'a design-document revision, or an implementation change.');
-    parts.push('');
-    parts.push('After making the changes, use the review tools to respond:');
-    parts.push('- Use replyToDiffComment (with threadId and text) to explain what you changed for each comment');
-    parts.push('- Use resolveDiffComment (with threadId) to mark each comment as done, once the change is made. ' + 
-        'Resolve only what you actually addressed.');
-    parts.push('- Leave anything you could not act on open.');
+    // The same policy the installed `/address-diff-review` command carries, so
+    // an agent reached through chat and one reached through a slash command are
+    // told to act on a comment identically. See src/review-policy.ts.
+    parts.push(prosePolicy({ tools: LM_TOOLS, threadRef: 'inline' }));
     return parts.join('\n');
 }
 

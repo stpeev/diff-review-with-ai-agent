@@ -16,6 +16,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { readText, backup } from './file-write';
 import { VSCODE_APPS, userDataRoot, parseProfiles } from './vscode-profiles';
+import { MCP_TOOLS, sectionedPolicy } from './review-policy';
 
 export type CommandId = 'perform' | 'address';
 export type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
@@ -27,7 +28,7 @@ export const INVOCATION: Record<CommandId, string> = {
 
 export const MARKER: Record<CommandId, string> = {
     perform: '<!-- diff-review:perform v1 -->',
-    address: '<!-- diff-review:address v1 -->',
+    address: '<!-- diff-review:address v2 -->',
 };
 
 const DESCRIPTION: Record<CommandId, string> = {
@@ -121,31 +122,7 @@ Call \`listDiffComments\`. If the tool is not available, stop and tell the
 user to run **\`Diff Review: Register MCP Server with a Coding Agent\`** from
 the command palette — this command is useless without it.
 
-### 2. Work the open threads oldest-first
-
-For each open thread, oldest-first, read the full thread and surrounding context. Determine whether 
-the comment requests a discussion, a design-document revision, or an implementation change.
-
-### 3. Reply to every thread you touch
-
-Call \`replyToDiffComment\` stating exactly what changed — or, if you decided
-not to change anything, why not. Do not resolve a thread without replying to
-it first.
-
-### 4. Resolve only what you actually addressed
-
-Call \`resolveDiffComment\` only on threads you changed code for (or
-explicitly decided, with a stated reason, needed no change). Leave anything
-you could not act on open.
-
-### 5. Never commit
-
-Committing stays the user's call.
-
-### 6. Report
-
-State what you addressed, what you left open, and why.
-`,
+${sectionedPolicy({ tools: MCP_TOOLS, threadRef: 'listed' }, 2)}`,
 };
 
 // --------------- Per-format wrapping ---------------
