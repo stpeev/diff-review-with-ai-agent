@@ -2674,13 +2674,15 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     }
 
     parts.push('---');
-    parts.push('Address the review comments above. Keep all other code unchanged.');
-    parts.push('');
     parts.push('Each comment heading carries its thread ID as "(Thread #N)"; use that N as threadId below.');
+    parts.push('Read the full thread and surrounding context. Determine whether the comment requests a discussion, ' +
+        'a design-document revision, or an implementation change.');
+    parts.push('');
     parts.push('After making the changes, use the review tools to respond:');
     parts.push('- Use replyToDiffComment (with threadId and text) to explain what you changed for each comment');
-    parts.push('- Use resolveDiffComment (with threadId) to mark each comment as done, once the change is made');
-    parts.push('- If you could not address a comment, reply explaining why and leave it unresolved');
+    parts.push('- Use resolveDiffComment (with threadId) to mark each comment as done, once the change is made. ' + 
+        'Resolve only what you actually addressed.');
+    parts.push('- Leave anything you could not act on open.');
     return parts.join('\n');
 }
 
