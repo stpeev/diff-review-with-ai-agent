@@ -18,7 +18,7 @@ import {
     Role, ThreadStatus, SerializedComment, SerializedThread, BranchState, ScopeFile,
     emptyBranch, emptyScopeFile, mergeScopeFiles,
     hashAnchor, anchorContextSnippet, findAnchorLine,
-    serializeComments, ghostContextValue, isGhostContextValue, ghostLabel, applyGhostEdit,
+    serializeComments, isDriftedContextValue, statusOfContextValue, presentationFor,
 } from './comment-store';
 
 // --------------- Comment Model ---------------
@@ -59,88 +59,84 @@ interface ThreadMeta {
     anchorHash?: string;
     anchorContext?: string;
     updatedAt: string;
-}
-
-/** A comment whose anchor could not be found on load or after an edit. It has
- *  no `vscode.CommentThread` — per the durability spec, a drifted comment
- *  leaves the gutter rather than sit at a line it no longer describes. */
-interface DriftedRecord {
-    id: number;
-    uri: string;
-    lastKnownLine: number;
-    status: ThreadStatus;
-    comments: SerializedComment[];
-    anchorContext?: string;
-    updatedAt: string;
+    /** Set once the anchor ladder has given up: the line the anchor was last seen on. See `isDrifted`. */
+    drift?: { lastKnownLine: number };
+    /** Kept at file level by the user's choice, and so exempt from drift checking. */
+    fileNote?: boolean;
 }
 
 const threadMap = new Map<number, vscode.CommentThread>();
 const threadIds = new WeakMap<vscode.CommentThread, number>();
 const threadMeta = new WeakMap<vscode.CommentThread, ThreadMeta>();
-const driftedMap = new Map<number, DriftedRecord>();
-/**
- * The `vscode.CommentThread` standing in for each drifted record, so a drifted
- * comment stays visible in the Comments panel instead of existing only in the
- * quick pick. Kept out of `threadMap` on purpose: a ghost sits at the line its
- * anchor was *last seen* on, which the drift ladder no longer vouches for, so
- * nothing that shifts, re-verifies or serializes live threads may pick it up.
- * The record in `driftedMap` remains the thing that gets saved; the ghost
- * writes edits back into it through `touchThread`.
- */
-const ghostThreads = new Map<number, vscode.CommentThread>();
 let nextThreadId = 1;
 
-/** The drifted id this thread is a ghost for, or undefined if it is a live thread. */
-function ghostIdOf(thread: vscode.CommentThread): number | undefined {
-    const id = threadIds.get(thread);
-    return id !== undefined && ghostThreads.get(id) === thread ? id : undefined;
+/**
+ * A drifted comment is an ordinary tracked thread — it replies, resolves and
+ * serializes like any other — that carries `meta.drift` because the anchor
+ * ladder gave up on it. Its line is only where the anchor was *last seen*, so
+ * every path that shifts or re-verifies a position must skip it. This is the
+ * single check for that; there is no separate map to forget to look in.
+ */
+function isDrifted(thread: vscode.CommentThread): boolean {
+    return isDriftedContextValue(thread.contextValue);
 }
 
-function applyGhostPresentation(thread: vscode.CommentThread, rec: DriftedRecord) {
-    thread.label = ghostLabel(rec.lastKnownLine, rec.status);
-    thread.contextValue = ghostContextValue(rec.status);
-    thread.state = rec.status === 'resolved'
-        ? vscode.CommentThreadState.Resolved
-        : vscode.CommentThreadState.Unresolved;
-    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+/** Threads whose line is still trustworthy — the starting point for shifting, re-verifying and submitting. */
+function liveThreads(): vscode.CommentThread[] {
+    return [...threadMap.values()].filter(t => !isDrifted(t));
 }
 
-/** Show a drifted record in the Comments panel. Called wherever a record enters `driftedMap`. */
-function makeGhost(rec: DriftedRecord) {
-    if (!activeController) return;
-    const line = Math.max(0, rec.lastKnownLine);
-    const thread = activeController.createCommentThread(
-        vscode.Uri.parse(rec.uri), new vscode.Range(line, 0, line, 0), []
-    );
-    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
+function driftedEntries(): { id: number; thread: vscode.CommentThread }[] {
+    return [...threadMap.entries()]
+        .filter(([, t]) => isDrifted(t))
+        .map(([id, thread]) => ({ id, thread }));
+}
+
+/** Open, and at a line we still vouch for — what "submit"/"copy" may put in front of an agent. */
+function isOpenLive(thread: vscode.CommentThread): boolean {
+    return !isDrifted(thread) && statusOfContextValue(thread.contextValue) === 'open';
+}
+
+function driftedCount(): number {
+    return [...threadMap.values()].filter(isDrifted).length;
+}
+
+/**
+ * The only place a thread's label, contextValue, state and collapsed-ness are
+ * set. Everything else changes the underlying facts — status, `meta.drift`,
+ * `meta.fileNote` — and calls this, so the label can never disagree with the
+ * contextValue the guards read.
+ */
+function present(thread: vscode.CommentThread, status?: ThreadStatus) {
+    const meta = threadMeta.get(thread);
+    const p = presentationFor({
+        status: status ?? statusOfContextValue(thread.contextValue),
+        lastKnownLine: meta?.drift?.lastKnownLine,
+        fileNote: meta?.fileNote,
+    });
+    thread.label = p.label;
+    thread.contextValue = p.contextValue;
+    thread.state = p.resolved ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
+    thread.collapsibleState = p.collapsed
+        ? vscode.CommentThreadCollapsibleState.Collapsed
+        : vscode.CommentThreadCollapsibleState.Expanded;
+}
+
+/** Build the thread for a stored comment, drifted or not, and track it. */
+function materializeThread(st: SerializedThread, line: number, drifted: boolean, anchor?: { anchorHash?: string; anchorContext?: string }): vscode.CommentThread {
+    const uri = vscode.Uri.parse(st.uri);
+    const at = Math.max(0, line);
+    const thread = activeController!.createCommentThread(uri, new vscode.Range(at, 0, at, 0), []);
+    thread.comments = st.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp || new Date().toISOString()));
     thread.canReply = true;
-    applyGhostPresentation(thread, rec);
-    ghostThreads.set(rec.id, thread);
-    threadIds.set(thread, rec.id);
-    threadMeta.set(thread, { updatedAt: rec.updatedAt, anchorContext: rec.anchorContext });
-}
-
-/** Re-render a ghost after its record was changed directly — the IPC, LM-tool and quick-pick paths mutate the record, not the thread. */
-function refreshGhost(id: number) {
-    const rec = driftedMap.get(id);
-    const thread = ghostThreads.get(id);
-    if (!rec || !thread) return;
-    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
-    applyGhostPresentation(thread, rec);
-}
-
-/** Mark a drifted record resolved and re-render its ghost. The caller saves the record's uri. */
-function resolveDrifted(rec: DriftedRecord) {
-    rec.status = 'resolved';
-    rec.updatedAt = new Date().toISOString();
-    refreshGhost(rec.id);
-}
-
-/** Forget a drifted comment: the record and the ghost showing it go together. */
-function dropDrifted(id: number) {
-    ghostThreads.get(id)?.dispose();
-    ghostThreads.delete(id);
-    driftedMap.delete(id);
+    trackThread(thread, st.id, {
+        updatedAt: st.updatedAt,
+        anchorHash: anchor?.anchorHash,
+        anchorContext: anchor?.anchorContext ?? st.anchorContext,
+        drift: drifted ? { lastKnownLine: at } : undefined,
+    });
+    present(thread, st.status);
+    return thread;
 }
 
 function trackThread(thread: vscode.CommentThread, id?: number, meta?: Partial<ThreadMeta>): number {
@@ -165,20 +161,10 @@ function touchThread(thread: vscode.CommentThread) {
     const meta = threadMeta.get(thread);
     if (meta) meta.updatedAt = now;
     else threadMeta.set(thread, { updatedAt: now });
-
-    // A ghost is not serialized itself — mirror the edit into the drifted
-    // record that is. Every mutation path (reply, edit, delete, resolve,
-    // unresolve) already funnels through here, so this is the only hook needed.
-    const gid = ghostIdOf(thread);
-    if (gid === undefined) return;
-    const rec = driftedMap.get(gid);
-    if (!rec) return;
-    applyGhostEdit(rec, thread.comments as ReviewComment[], thread.contextValue, now);
-    thread.label = ghostLabel(rec.lastKnownLine, rec.status);
 }
 
 function findThreadForComment(commentId: number): vscode.CommentThread | undefined {
-    for (const thread of [...threadMap.values(), ...ghostThreads.values()]) {
+    for (const thread of threadMap.values()) {
         if (thread.comments.some(c => (c as ReviewComment).id === commentId)) {
             return thread;
         }
@@ -198,55 +184,20 @@ function getThreadsByFile(): Map<string, { id: number; thread: vscode.CommentThr
     return byFile;
 }
 
-function getDriftedByFile(): Map<string, DriftedRecord[]> {
-    const byFile = new Map<string, DriftedRecord[]>();
-    for (const rec of driftedMap.values()) {
-        const rel = vscode.workspace.asRelativePath(vscode.Uri.parse(rec.uri));
-        if (!byFile.has(rel)) byFile.set(rel, []);
-        byFile.get(rel)!.push(rec);
-    }
-    return byFile;
-}
-
 function threadPreview(thread: vscode.CommentThread): string {
     const first = thread.comments[0];
+    if (!first) return '';
     const text = typeof first.body === 'string' ? first.body : first.body.value;
     return text.length > 55 ? text.substring(0, 52) + '...' : text;
 }
 
-function driftedPreview(rec: DriftedRecord): string {
-    const first = rec.comments[0];
-    const text = first ? first.body : '';
-    return text.length > 55 ? text.substring(0, 52) + '...' : text;
-}
-
 function resolveThread(thread: vscode.CommentThread) {
-    if (isGhostContextValue(thread.contextValue)) {
-        thread.contextValue = ghostContextValue('resolved');
-        thread.state = vscode.CommentThreadState.Resolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
-        touchThread(thread); // writes the status back and re-labels from the record
-        return;
-    }
-    thread.label = '✅ Resolved';
-    thread.contextValue = 'resolved';
-    thread.state = vscode.CommentThreadState.Resolved;
-    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    present(thread, 'resolved');
     touchThread(thread);
 }
 
 function unresolveThread(thread: vscode.CommentThread) {
-    if (isGhostContextValue(thread.contextValue)) {
-        thread.contextValue = ghostContextValue('open');
-        thread.state = vscode.CommentThreadState.Unresolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-        touchThread(thread);
-        return;
-    }
-    thread.label = 'Open';
-    thread.contextValue = 'open';
-    thread.state = vscode.CommentThreadState.Unresolved;
-    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+    present(thread, 'open');
     touchThread(thread);
 }
 
@@ -259,8 +210,8 @@ let outputLog: vscode.OutputChannel;
 
 function refresh() {
     const n = threadMap.size;
-    const open = [...threadMap.values()].filter(t => t.contextValue !== 'resolved').length;
-    const drifted = driftedMap.size;
+    const open = [...threadMap.values()].filter(t => statusOfContextValue(t.contextValue) === 'open').length;
+    const drifted = driftedCount();
     const parts: string[] = [];
     if (n > 0) parts.push(`${open} open · ${n - open} resolved`);
     if (drifted > 0) parts.push(`${drifted} drifted`);
@@ -456,9 +407,7 @@ async function switchFolderScope(folder: FolderInfo, scope: { scopeId: string; b
     outputLog.appendLine(`[Diff Review] ${folder.folderPath}: scope ${folder.scopeId} → ${scope.scopeId}`);
     await flushFolderSaveNow(folder);
 
-    const owned = threadsOwnedByFolder(folder);
-    for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
-    for (const id of owned.driftedIds) dropDrifted(id);
+    disposeFolderThreads(folder);
 
     folder.scopeId = scope.scopeId;
     folder.branchKey = scope.branchKey;
@@ -491,15 +440,20 @@ function ownerFolderForUri(uri: vscode.Uri): FolderInfo | undefined {
     return (match as any)?.folder;
 }
 
-function threadsOwnedByFolder(folder: FolderInfo): { threadIds: number[]; driftedIds: number[] } {
-    const owned = { threadIds: [] as number[], driftedIds: [] as number[] };
+function threadsOwnedByFolder(folder: FolderInfo): number[] {
+    const owned: number[] = [];
     for (const [id, thread] of threadMap) {
-        if (ownerFolderForUri(thread.uri) === folder) owned.threadIds.push(id);
-    }
-    for (const [id, rec] of driftedMap) {
-        if (ownerFolderForUri(vscode.Uri.parse(rec.uri)) === folder) owned.driftedIds.push(id);
+        if (ownerFolderForUri(thread.uri) === folder) owned.push(id);
     }
     return owned;
+}
+
+/** Drop a folder's threads from memory (its scope, branch or file changed under us). */
+function disposeFolderThreads(folder: FolderInfo) {
+    for (const id of threadsOwnedByFolder(folder)) {
+        threadMap.get(id)?.dispose();
+        threadMap.delete(id);
+    }
 }
 
 // --------------- Legacy workspaceState migration ---------------
@@ -578,34 +532,31 @@ function writeMeta(folder: FolderInfo, file: ScopeFile) {
 }
 
 function currentBranchStateFromMemory(folder: FolderInfo): BranchState {
-    const owned = threadsOwnedByFolder(folder);
     const threads: SerializedThread[] = [];
     let maxThreadId = 0;
     let maxCommentId = 0;
 
-    for (const id of owned.threadIds) {
+    for (const id of threadsOwnedByFolder(folder)) {
         const thread = threadMap.get(id)!;
         const meta = threadMeta.get(thread);
         const comments = serializeComments(thread.comments as ReviewComment[]);
         for (const c of comments) maxCommentId = Math.max(maxCommentId, c.id);
         maxThreadId = Math.max(maxThreadId, id);
+        // A drifted thread's range is only where its anchor was last seen, so
+        // that is what gets stored — and `anchorHash` is deliberately dropped,
+        // since keeping it would let a later load silently re-verify a
+        // position the ladder has already rejected.
+        const drift = meta?.drift;
         threads.push({
             id, uri: thread.uri.toString(),
-            startLine: thread.range.start.line, endLine: thread.range.end.line,
-            status: thread.contextValue === 'resolved' ? 'resolved' : 'open',
+            startLine: drift ? drift.lastKnownLine : thread.range.start.line,
+            endLine: drift ? drift.lastKnownLine : thread.range.end.line,
+            status: statusOfContextValue(thread.contextValue),
             comments,
             updatedAt: meta?.updatedAt ?? new Date().toISOString(),
-            anchorHash: meta?.anchorHash, anchorContext: meta?.anchorContext,
-        });
-    }
-    for (const id of owned.driftedIds) {
-        const rec = driftedMap.get(id)!;
-        maxThreadId = Math.max(maxThreadId, id);
-        for (const c of rec.comments) maxCommentId = Math.max(maxCommentId, c.id);
-        threads.push({
-            id, uri: rec.uri, startLine: rec.lastKnownLine, endLine: rec.lastKnownLine,
-            status: rec.status, comments: rec.comments, updatedAt: rec.updatedAt,
-            anchorContext: rec.anchorContext, drifted: true,
+            anchorHash: drift ? undefined : meta?.anchorHash,
+            anchorContext: meta?.anchorContext,
+            drifted: drift ? true : undefined,
         });
     }
 
@@ -710,55 +661,28 @@ function warnTransient(uri: vscode.Uri) {
 
 // --------------- Loading threads for a settled folder ---------------
 
-/** Keeps the global id counters ahead of a loaded thread's id and its comments' ids — `trackThread`/`ReviewComment` do the same for live threads, but a drifted record is set directly into `driftedMap`, bypassing both. */
+/** Keeps the global id counters ahead of a loaded thread's id and its comments' ids — `trackThread` and `ReviewComment` only ever mint fresh ones. */
 function reserveIds(threadId: number, comments: SerializedComment[]) {
     if (threadId >= nextThreadId) nextThreadId = threadId + 1;
     for (const c of comments) if (c.id >= nextCommentId) nextCommentId = c.id + 1;
 }
 
 function instantiateThread(folder: FolderInfo, st: SerializedThread) {
+    reserveIds(st.id, st.comments);
+
     if (st.drifted) {
-        reserveIds(st.id, st.comments);
-        const rec: DriftedRecord = {
-            id: st.id, uri: st.uri, lastKnownLine: st.startLine, status: st.status,
-            comments: st.comments, anchorContext: st.anchorContext, updatedAt: st.updatedAt,
-        };
-        driftedMap.set(st.id, rec);
-        makeGhost(rec);
+        materializeThread(st, st.startLine, true);
         return;
     }
 
-    const uri = vscode.Uri.parse(st.uri);
-    const verified = verifyOrLocateAnchor(folder, uri, st);
+    const verified = verifyOrLocateAnchor(folder, vscode.Uri.parse(st.uri), st);
     if (verified === 'drifted') {
-        reserveIds(st.id, st.comments);
-        const rec: DriftedRecord = {
-            id: st.id, uri: st.uri, lastKnownLine: st.startLine, status: st.status,
-            comments: st.comments, anchorContext: st.anchorContext, updatedAt: st.updatedAt,
-        };
-        driftedMap.set(st.id, rec);
-        makeGhost(rec);
+        materializeThread(st, st.startLine, true);
         return;
     }
 
     const line = typeof verified === 'number' ? verified : st.startLine;
-    const range = new vscode.Range(line, 0, line, 0);
-    const thread = activeController!.createCommentThread(uri, range, []);
-    const comments = st.comments.map(sc => new ReviewComment(sc.body, sc.role, sc.id, sc.timestamp || new Date().toISOString()));
-    thread.comments = comments;
-    thread.canReply = true;
-    if (st.status === 'resolved') {
-        thread.label = '✅ Resolved';
-        thread.contextValue = 'resolved';
-        thread.state = vscode.CommentThreadState.Resolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
-    } else {
-        thread.label = 'Open';
-        thread.contextValue = 'open';
-        thread.state = vscode.CommentThreadState.Unresolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-    }
-    trackThread(thread, st.id, { anchorHash: st.anchorHash, anchorContext: st.anchorContext, updatedAt: st.updatedAt });
+    materializeThread(st, line, false, { anchorHash: st.anchorHash, anchorContext: st.anchorContext });
 }
 
 const ANCHOR_CONTEXT_RADIUS = 2;
@@ -823,9 +747,7 @@ async function switchFolderBranch(folder: FolderInfo, newBranchKey: string) {
     // awaiting it the reload can race the write and load stale data.
     await flushFolderSaveNow(folder);
 
-    const owned = threadsOwnedByFolder(folder);
-    for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
-    for (const id of owned.driftedIds) dropDrifted(id);
+    disposeFolderThreads(folder);
 
     folder.branchKey = newBranchKey;
     const file = readScopeFileOrEmpty(folder.filePath!);
@@ -865,9 +787,7 @@ function watchFolderScope(folder: FolderInfo) {
     const onExternalChange = () => {
         if (folder.suppressWatcherUntil && Date.now() < folder.suppressWatcherUntil) return; // our own write
         outputLog.appendLine(`[Diff Review] ${folder.folderPath}: external change to ${folder.filePath}, reloading`);
-        const owned = threadsOwnedByFolder(folder);
-        for (const id of owned.threadIds) { threadMap.get(id)?.dispose(); threadMap.delete(id); }
-        for (const id of owned.driftedIds) dropDrifted(id);
+        disposeFolderThreads(folder);
         loadFolderThreads(folder);
         refresh();
     };
@@ -930,8 +850,11 @@ function setupLineTracking(context: vscode.ExtensionContext) {
             if (e.contentChanges.length === 0) return;
 
             const docUri = e.document.uri.toString();
+            // Drifted threads are excluded here and nowhere else: their line
+            // is only where the anchor was last seen, so shifting it on an
+            // edit would dress a guess up as a tracked position.
             const affected: vscode.CommentThread[] = [];
-            for (const thread of threadMap.values()) {
+            for (const thread of liveThreads()) {
                 if (thread.uri.toString() === docUri) affected.push(thread);
             }
             if (affected.length === 0) return;
@@ -986,28 +909,29 @@ function setupLineTracking(context: vscode.ExtensionContext) {
             }
 
             for (const thread of affected) {
+                // Still tracked: a thread can be disposed while this handler runs.
                 if (threadMap.has(threadIds.get(thread) ?? -1)) queueSaveForThread(thread, LINE_TRACKING_DEBOUNCE_MS);
             }
         })
     );
 }
 
-/** Move a live thread into `driftedMap`: it has no trustworthy line any more, so it leaves the gutter (F4). */
+/** The anchor is gone: mark this thread drifted in place (F4). It keeps its id, its conversation and its thread — only the promise that its line is current is withdrawn. */
 function driftThread(thread: vscode.CommentThread) {
     const id = threadIds.get(thread);
-    if (id === undefined) return;
-    const meta = threadMeta.get(thread);
-    const comments = serializeComments(thread.comments as ReviewComment[]);
-    const rec: DriftedRecord = {
-        id, uri: thread.uri.toString(), lastKnownLine: thread.range.start.line,
-        status: thread.contextValue === 'resolved' ? 'resolved' : 'open',
-        comments, anchorContext: meta?.anchorContext, updatedAt: new Date().toISOString(),
-    };
-    driftedMap.set(id, rec);
-    threadMap.delete(id);
-    thread.dispose();
-    makeGhost(rec);
-    queueSaveForUri(vscode.Uri.parse(rec.uri));
+    if (id === undefined || isDrifted(thread)) return;
+    let meta = threadMeta.get(thread);
+    if (!meta) {
+        meta = { updatedAt: new Date().toISOString() };
+        threadMeta.set(thread, meta);
+    }
+    meta.drift = { lastKnownLine: thread.range.start.line };
+    // The anchor just failed to verify; keeping the hash would invite a later
+    // load to re-verify a position the ladder has already rejected.
+    meta.anchorHash = undefined;
+    present(thread);
+    touchThread(thread);
+    queueSaveForUri(thread.uri);
     refresh();
     outputLog.appendLine(`[Diff Review] Thread #${id} drifted — its anchor is no longer found in the file.`);
 }
@@ -1058,14 +982,6 @@ function checkWorkspaceRoot(expected: string | undefined): boolean {
     return myWorkspaceRoots.includes(expected);
 }
 
-function findThreadOrDrifted(threadId: number): { kind: 'live'; thread: vscode.CommentThread } | { kind: 'drifted'; rec: DriftedRecord } | undefined {
-    const thread = threadMap.get(threadId);
-    if (thread) return { kind: 'live', thread };
-    const rec = driftedMap.get(threadId);
-    if (rec) return { kind: 'drifted', rec };
-    return undefined;
-}
-
 function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
     return new Promise((resolve, reject) => {
         myWorkspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
@@ -1082,17 +998,13 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     res.writeHead(200);
                     res.end(JSON.stringify({ workspaceRoots: myWorkspaceRoots, pid: process.pid }));
                 } else if (method === 'GET' && url.pathname === '/comments') {
-                    const threads = [
-                        ...[...threadMap.entries()].map(([id, t]) => ({
-                            id, uri: t.uri.toString(), startLine: t.range.start.line, endLine: t.range.end.line,
-                            status: t.contextValue === 'resolved' ? 'resolved' : 'open',
-                            comments: t.comments.map(c => ({ role: (c as ReviewComment).role, body: typeof c.body === 'string' ? c.body : c.body.value })),
-                        })),
-                        ...[...driftedMap.values()].map(rec => ({
-                            id: rec.id, uri: rec.uri, startLine: rec.lastKnownLine, endLine: rec.lastKnownLine,
-                            status: 'drifted', comments: rec.comments.map(c => ({ role: c.role, body: c.body })),
-                        })),
-                    ];
+                    const threads = [...threadMap.entries()].map(([id, t]) => ({
+                        id, uri: t.uri.toString(), startLine: t.range.start.line, endLine: t.range.end.line,
+                        // 'drifted' shadows the real status here, as it always has: a
+                        // caller must not act on the line of a drifted comment.
+                        status: isDrifted(t) ? 'drifted' : statusOfContextValue(t.contextValue),
+                        comments: t.comments.map(c => ({ role: (c as ReviewComment).role, body: typeof c.body === 'string' ? c.body : c.body.value })),
+                    }));
                     outputLog.appendLine(`[Diff Review] Comments listed via IPC (${threads.length} thread(s))`);
                     res.writeHead(200);
                     res.end(JSON.stringify({ threads }));
@@ -1100,27 +1012,20 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     const body = await readBody(req);
                     const { threadId, text, expectWorkspaceRoot } = JSON.parse(body);
                     if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
-                    const found = findThreadOrDrifted(threadId);
-                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
-                    if (found.kind === 'live') {
-                        const reply = new ReviewComment(text, 'agent');
-                        found.thread.comments = [...found.thread.comments, reply];
-                        found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-                        touchThread(found.thread);
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
-                        queueSaveForThread(found.thread);
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ ok: true, commentId: reply.id }));
-                    } else {
-                        const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
-                        found.rec.comments.push(comment);
-                        found.rec.updatedAt = comment.timestamp;
-                        refreshGhost(threadId);
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC, drifted) at ${found.rec.uri}`);
-                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ ok: true, commentId: comment.id, note: 'This thread is drifted — its original location was not found.' }));
-                    }
+                    const thread = threadMap.get(threadId);
+                    if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    const drifted = isDrifted(thread);
+                    const reply = new ReviewComment(text, 'agent');
+                    thread.comments = [...thread.comments, reply];
+                    if (!drifted) thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+                    touchThread(thread);
+                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+                    queueSaveForThread(thread);
+                    res.writeHead(200);
+                    res.end(JSON.stringify({
+                        ok: true, commentId: reply.id,
+                        ...(drifted ? { note: 'This thread is drifted — its original location was not found.' } : {}),
+                    }));
                 } else if (method === 'POST' && url.pathname === '/create') {
                     const body = await readBody(req);
                     const { path: relPath, line, endLine, text, expectWorkspaceRoot } = JSON.parse(body);
@@ -1135,20 +1040,12 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     const body = await readBody(req);
                     const { threadId, expectWorkspaceRoot } = JSON.parse(body);
                     if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
-                    const found = findThreadOrDrifted(threadId);
-                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
-                    if (found.kind === 'live') {
-                        resolveThread(found.thread);
-                        refresh();
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
-                        queueSaveForThread(found.thread);
-                    } else {
-                        found.rec.status = 'resolved';
-                        found.rec.updatedAt = new Date().toISOString();
-                        refreshGhost(threadId);
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC, drifted) at ${found.rec.uri}`);
-                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
-                    }
+                    const thread = threadMap.get(threadId);
+                    if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    resolveThread(thread);
+                    refresh();
+                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+                    queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/unresolve') {
@@ -1167,24 +1064,20 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     const body = await readBody(req);
                     const { threadId, expectWorkspaceRoot } = JSON.parse(body);
                     if (!checkWorkspaceRoot(expectWorkspaceRoot)) { respondMismatch(res); return; }
-                    const found = findThreadOrDrifted(threadId);
-                    if (!found) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
-                    if (found.kind === 'live') {
-                        threadMap.delete(threadId);
-                        found.thread.dispose();
-                        refresh();
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
-                        queueSaveForUri(found.thread.uri);
-                    } else {
-                        dropDrifted(threadId);
-                        outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC (drifted) at ${found.rec.uri}`);
-                        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
-                    }
+                    const thread = threadMap.get(threadId);
+                    if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
+                    const uri = thread.uri;
+                    const wasDrifted = isDrifted(thread);
+                    threadMap.delete(threadId);
+                    thread.dispose();
+                    refresh();
+                    outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
+                    queueSaveForUri(uri);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'GET' && url.pathname === '/health') {
                     res.writeHead(200);
-                    res.end(JSON.stringify({ ok: true, comments: threadMap.size, drifted: driftedMap.size }));
+                    res.end(JSON.stringify({ ok: true, comments: threadMap.size, drifted: driftedCount() }));
                 } else {
                     res.writeHead(404);
                     res.end(JSON.stringify({ error: 'Not found' }));
@@ -1521,11 +1414,9 @@ export function activate(context: vscode.ExtensionContext) {
             thread.comments = [comment];
             thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
             thread.canReply = true;
-            thread.label = 'Open';
-            thread.contextValue = 'open';
-            thread.state = vscode.CommentThreadState.Unresolved;
             const anchor = computeAnchorForNewThread(thread);
             const tid = trackThread(thread, undefined, anchor);
+            present(thread, 'open');
             outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             refresh();
             queueSaveForThread(thread);
@@ -1603,9 +1494,8 @@ export function activate(context: vscode.ExtensionContext) {
             const uri = thread.uri;
             const tid = threadIds.get(thread);
             if (thread.comments.length <= 1) {
-                const gid = ghostIdOf(thread);
-                if (gid !== undefined) dropDrifted(gid);
-                else { untrackThread(thread); thread.dispose(); }
+                untrackThread(thread);
+                thread.dispose();
                 outputLog.appendLine(`[Diff Review] Comment #${tid} deleted (last comment, thread removed) at ${vscode.workspace.asRelativePath(uri)}`);
             } else {
                 thread.comments = thread.comments.filter(
@@ -1634,10 +1524,9 @@ export function activate(context: vscode.ExtensionContext) {
             }
             const uri = thread.uri;
             const tid = threadIds.get(thread);
-            const gid = ghostIdOf(thread);
-            if (gid !== undefined) dropDrifted(gid);
-            else { untrackThread(thread); thread.dispose(); }
-            outputLog.appendLine(`[Diff Review] Comment #${gid ?? tid} deleted (whole thread, ${count} comment(s)) at ${vscode.workspace.asRelativePath(uri)}`);
+            untrackThread(thread);
+            thread.dispose();
+            outputLog.appendLine(`[Diff Review] Comment #${tid} deleted (whole thread, ${count} comment(s)) at ${vscode.workspace.asRelativePath(uri)}`);
             refresh();
             queueSaveForUri(uri);
         })
@@ -1679,8 +1568,8 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Fix a drifted (ghost) comment's location, from the Comments panel ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.fixDriftedLocation', (thread: vscode.CommentThread) => {
-            const id = ghostIdOf(thread);
-            if (id !== undefined) void showDriftedActions(id);
+            const id = threadIds.get(thread);
+            if (id !== undefined && isDrifted(thread)) void showDriftedActions(id);
         })
     );
 
@@ -1712,21 +1601,11 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Resolve all ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.resolveAll', () => {
-            let count = 0;
-            const touched: vscode.CommentThread[] = [];
-            for (const thread of threadMap.values()) {
-                if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
-            }
-            const driftedUris: vscode.Uri[] = [];
-            for (const rec of driftedMap.values()) {
-                if (rec.status === 'resolved') continue;
-                resolveDrifted(rec);
-                driftedUris.push(vscode.Uri.parse(rec.uri));
-                count++;
-            }
+            const touched = [...threadMap.values()].filter(t => statusOfContextValue(t.contextValue) === 'open');
+            for (const thread of touched) resolveThread(thread);
+            const count = touched.length;
             refresh();
             for (const thread of touched) queueSaveForThread(thread);
-            for (const uri of driftedUris) queueSaveForUri(uri);
             if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''}.`);
         })
     );
@@ -1734,17 +1613,14 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Delete all resolved ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.deleteResolved', async () => {
-            const resolved = [...threadMap.entries()].filter(([, t]) => t.contextValue === 'resolved');
-            const resolvedDrifted = [...driftedMap.values()].filter(rec => rec.status === 'resolved');
-            const total = resolved.length + resolvedDrifted.length;
-            if (total === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
+            const resolved = [...threadMap.entries()].filter(([, t]) => statusOfContextValue(t.contextValue) === 'resolved');
+            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments to delete.'); return; }
             const answer = await vscode.window.showWarningMessage(
-                `Delete ${total} resolved comment${total !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
+                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''}?`, { modal: true }, 'Delete'
             );
             if (answer !== 'Delete') return;
             const uris: vscode.Uri[] = [];
             for (const [id, thread] of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
-            for (const rec of resolvedDrifted) { uris.push(vscode.Uri.parse(rec.uri)); dropDrifted(rec.id); }
             refresh();
             for (const uri of uris) queueSaveForUri(uri);
         })
@@ -1753,17 +1629,15 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Clear all ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.clearAll', async () => {
-            if (threadMap.size === 0 && driftedMap.size === 0) return;
-            const total = threadMap.size + driftedMap.size;
+            if (threadMap.size === 0) return;
+            const total = threadMap.size;
             const answer = await vscode.window.showWarningMessage(
                 `Delete all ${total} review comment${total !== 1 ? 's' : ''}?`, { modal: true }, 'Delete All'
             );
             if (answer !== 'Delete All') return;
             const uris: vscode.Uri[] = [];
             for (const thread of threadMap.values()) { uris.push(thread.uri); thread.dispose(); }
-            for (const rec of driftedMap.values()) uris.push(vscode.Uri.parse(rec.uri));
             threadMap.clear();
-            for (const id of [...driftedMap.keys()]) dropDrifted(id);
             refresh();
             for (const uri of uris) queueSaveForUri(uri);
         })
@@ -1775,7 +1649,7 @@ export function activate(context: vscode.ExtensionContext) {
             const byFile = getThreadsByFile();
             const entries = byFile.get(fileKey);
             if (!entries) return;
-            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
+            const openThreads = entries.filter(e => isOpenLive(e.thread)).map(e => e.thread);
             if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
             const prompt = await buildPrompt(openThreads);
             try {
@@ -1791,23 +1665,11 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.resolveFile', (fileKey: string) => {
             const entries = getThreadsByFile().get(fileKey) ?? [];
-            const driftedEntries = getDriftedByFile().get(fileKey) ?? [];
-            if (entries.length === 0 && driftedEntries.length === 0) return;
-            let count = 0;
-            const touched: vscode.CommentThread[] = [];
-            for (const { thread } of entries) {
-                if (thread.contextValue !== 'resolved') { resolveThread(thread); touched.push(thread); count++; }
-            }
-            const driftedUris: vscode.Uri[] = [];
-            for (const rec of driftedEntries) {
-                if (rec.status === 'resolved') continue;
-                resolveDrifted(rec);
-                driftedUris.push(vscode.Uri.parse(rec.uri));
-                count++;
-            }
+            const touched = entries.map(e => e.thread).filter(t => statusOfContextValue(t.contextValue) === 'open');
+            for (const thread of touched) resolveThread(thread);
+            const count = touched.length;
             refresh();
             for (const thread of touched) queueSaveForThread(thread);
-            for (const uri of driftedUris) queueSaveForUri(uri);
             if (count > 0) vscode.window.showInformationMessage(`Resolved ${count} comment${count !== 1 ? 's' : ''} in ${fileKey}.`);
         })
     );
@@ -1816,17 +1678,14 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.deleteResolvedFile', async (fileKey: string) => {
             const entries = getThreadsByFile().get(fileKey) ?? [];
-            const resolved = entries.filter(e => e.thread.contextValue === 'resolved');
-            const resolvedDrifted = (getDriftedByFile().get(fileKey) ?? []).filter(rec => rec.status === 'resolved');
-            const total = resolved.length + resolvedDrifted.length;
-            if (total === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
+            const resolved = entries.filter(e => statusOfContextValue(e.thread.contextValue) === 'resolved');
+            if (resolved.length === 0) { vscode.window.showInformationMessage('No resolved comments in this file.'); return; }
             const answer = await vscode.window.showWarningMessage(
-                `Delete ${total} resolved comment${total !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
+                `Delete ${resolved.length} resolved comment${resolved.length !== 1 ? 's' : ''} in ${fileKey}?`, { modal: true }, 'Delete'
             );
             if (answer !== 'Delete') return;
             const uris: vscode.Uri[] = [];
             for (const { id, thread } of resolved) { uris.push(thread.uri); threadMap.delete(id); thread.dispose(); }
-            for (const rec of resolvedDrifted) { uris.push(vscode.Uri.parse(rec.uri)); dropDrifted(rec.id); }
             refresh();
             for (const uri of uris) queueSaveForUri(uri);
         })
@@ -1844,7 +1703,7 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Copy all open to clipboard ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.copyAll', async () => {
-            const openThreads = [...threadMap.values()].filter(t => t.contextValue !== 'resolved');
+            const openThreads = liveThreads().filter(isOpenLive);
             if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments to copy.'); return; }
             const prompt = await buildPrompt(openThreads);
             await vscode.env.clipboard.writeText(prompt);
@@ -1858,7 +1717,7 @@ export function activate(context: vscode.ExtensionContext) {
             const byFile = getThreadsByFile();
             const entries = byFile.get(fileKey);
             if (!entries) return;
-            const openThreads = entries.filter(e => e.thread.contextValue !== 'resolved').map(e => e.thread);
+            const openThreads = entries.filter(e => isOpenLive(e.thread)).map(e => e.thread);
             if (openThreads.length === 0) { vscode.window.showInformationMessage('No open comments in this file.'); return; }
             const prompt = await buildPrompt(openThreads);
             await vscode.env.clipboard.writeText(prompt);
@@ -2212,7 +2071,7 @@ async function showSlashCommandTargets() {
 // --------------- Interactive QuickPick Panel ---------------
 
 async function showCommentPanel() {
-    if (threadMap.size === 0 && driftedMap.size === 0) {
+    if (threadMap.size === 0) {
         vscode.window.showInformationMessage('No review comments.');
         return;
     }
@@ -2225,10 +2084,10 @@ async function showCommentPanel() {
     }
 
     const qp = vscode.window.createQuickPick<ActionItem>();
-    const openCount = [...threadMap.values()].filter(t => t.contextValue !== 'resolved').length;
+    const openCount = [...threadMap.values()].filter(t => statusOfContextValue(t.contextValue) === 'open').length;
     const resolvedCount = threadMap.size - openCount;
-    const driftedCount = driftedMap.size;
-    qp.title = `Review Comments (${openCount} open, ${resolvedCount} resolved${driftedCount > 0 ? `, ${driftedCount} drifted` : ''})`;
+    const drifted = driftedCount();
+    qp.title = `Review Comments (${openCount} open, ${resolvedCount} resolved${drifted > 0 ? `, ${drifted} drifted` : ''})`;
     qp.placeholder = 'Type to search comments… Select an action or comment.';
     qp.matchOnDescription = true;
 
@@ -2248,7 +2107,11 @@ async function showCommentPanel() {
 
         const byFile = getThreadsByFile();
 
-        for (const [file, entries] of byFile) {
+        for (const [file, allEntries] of byFile) {
+            // Drifted threads are listed in "Needs re-attaching" instead — a
+            // line number next to them would be a position we do not vouch for.
+            const entries = allEntries.filter(e => !isDrifted(e.thread));
+            if (entries.length === 0) continue;
             const sorted = entries.sort((a, b) => a.thread.range.start.line - b.thread.range.start.line);
 
             // Filter: check if any comment in this file matches
@@ -2263,8 +2126,11 @@ async function showCommentPanel() {
 
             if (matchingEntries.length === 0) continue;
 
-            const fileOpen = matchingEntries.filter(e => e.thread.contextValue !== 'resolved').length;
-            const fileResolved = matchingEntries.length - fileOpen;
+            // Counted over every thread in the file, drifted included, because
+            // that is what the batch actions below act on — the rows listed
+            // here are only the live subset.
+            const fileOpen = allEntries.filter(e => statusOfContextValue(e.thread.contextValue) === 'open').length;
+            const fileResolved = allEntries.length - fileOpen;
 
             // File header with batch actions
             items.push({ label: `📁 ${file}  (${fileOpen} open, ${fileResolved} resolved)`, kind: vscode.QuickPickItemKind.Separator });
@@ -2279,7 +2145,7 @@ async function showCommentPanel() {
             for (const { id, thread } of matchingEntries) {
                 const line = thread.range.start.line + 1;
                 const preview = threadPreview(thread);
-                const resolved = thread.contextValue === 'resolved';
+                const resolved = statusOfContextValue(thread.contextValue) === 'resolved';
                 const status = resolved ? '✅' : '💬';
                 const replyCount = thread.comments.length - 1;
                 const replyInfo = replyCount > 0 ? `${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}` : '';
@@ -2293,25 +2159,32 @@ async function showCommentPanel() {
             }
         }
 
-        // Needs re-attaching (F4): drifted threads have left the gutter, so
-        // they only ever appear here, grouped by their last-known file.
-        if (driftedMap.size > 0) {
-            const byDriftedFile = getDriftedByFile();
+        // Needs re-attaching (F4): drifted threads are listed here rather than
+        // under their file, since their last-known line is not a location.
+        const drift = driftedEntries();
+        if (drift.length > 0) {
             const dl = filter.toLowerCase();
-            items.push({ label: `🧩 Needs re-attaching (${driftedMap.size})`, kind: vscode.QuickPickItemKind.Separator });
-            for (const [file, recs] of byDriftedFile) {
+            const byDriftedFile = new Map<string, { id: number; thread: vscode.CommentThread }[]>();
+            for (const entry of drift) {
+                const rel = vscode.workspace.asRelativePath(entry.thread.uri);
+                if (!byDriftedFile.has(rel)) byDriftedFile.set(rel, []);
+                byDriftedFile.get(rel)!.push(entry);
+            }
+            items.push({ label: `🧩 Needs re-attaching (${drift.length})`, kind: vscode.QuickPickItemKind.Separator });
+            for (const [file, entries] of byDriftedFile) {
                 const matching = dl
-                    ? recs.filter(r => file.toLowerCase().includes(dl) || r.comments.some(c => c.body.toLowerCase().includes(dl)))
-                    : recs;
+                    ? entries.filter(e => file.toLowerCase().includes(dl) || e.thread.comments.some(c => (typeof c.body === 'string' ? c.body : c.body.value).toLowerCase().includes(dl)))
+                    : entries;
                 if (matching.length === 0) continue;
                 if (matching.length > 1) {
                     items.push({ label: `  $(sync) Re-attach all in ${file}…`, description: `${matching.length} drifted`, action: 'reattachAllInFile', fileKey: file });
                 }
-                for (const rec of matching) {
+                for (const { id, thread } of matching) {
+                    const lastKnown = threadMeta.get(thread)?.drift?.lastKnownLine ?? thread.range.start.line;
                     items.push({
-                        label: `    🧩 (was L${rec.lastKnownLine + 1}): ${driftedPreview(rec)}`,
+                        label: `    🧩 (was L${lastKnown + 1}): ${threadPreview(thread)}`,
                         description: file,
-                        driftedId: rec.id,
+                        driftedId: id,
                         action: 'driftedAction',
                     });
                 }
@@ -2381,7 +2254,7 @@ async function showCommentActions(threadId: number) {
     const rel = vscode.workspace.asRelativePath(thread.uri);
     const line = thread.range.start.line + 1;
     const preview = threadPreview(thread);
-    const resolved = thread.contextValue === 'resolved';
+    const resolved = statusOfContextValue(thread.contextValue) === 'resolved';
 
     interface ActionItem extends vscode.QuickPickItem { action: string; }
 
@@ -2443,25 +2316,35 @@ async function showCommentActions(threadId: number) {
 
 // --------------- Drifted Comment Actions (F4) ---------------
 
-async function showDriftedActions(id: number) {
-    const rec = driftedMap.get(id);
-    if (!rec) return;
+/** The drifted thread for `id`, or undefined if it is gone or no longer drifted. */
+function driftedThread(id: number): { thread: vscode.CommentThread; meta: ThreadMeta; lastKnownLine: number } | undefined {
+    const thread = threadMap.get(id);
+    const meta = thread && threadMeta.get(thread);
+    if (!thread || !meta?.drift || !isDrifted(thread)) return undefined;
+    return { thread, meta, lastKnownLine: meta.drift.lastKnownLine };
+}
 
-    const uri = vscode.Uri.parse(rec.uri);
+async function showDriftedActions(id: number) {
+    const found = driftedThread(id);
+    if (!found) return;
+    const { thread, meta, lastKnownLine } = found;
+
+    const uri = thread.uri;
     const rel = vscode.workspace.asRelativePath(uri);
-    const preview = driftedPreview(rec);
+    const preview = threadPreview(thread);
     const fileExists = uri.scheme === 'file' && fs.existsSync(uri.fsPath);
+    const resolved = statusOfContextValue(thread.contextValue) === 'resolved';
 
     interface ActionItem extends vscode.QuickPickItem { action: string; }
 
     const items: ActionItem[] = [
-        { label: '$(diff) Show Original Context', description: `${rel} (was L${rec.lastKnownLine + 1})`, action: 'showContext' },
+        { label: '$(diff) Show Original Context', description: `${rel} (was L${lastKnownLine + 1})`, action: 'showContext' },
         ...(fileExists ? [
             { label: '$(target) Re-attach…', description: 'Place your cursor on the line, then confirm', action: 'reattach' },
             { label: '$(search) Search Again', description: 'Re-scan the file for this anchor', action: 'searchAgain' },
         ] : []),
         { label: '$(note) Keep as File Note', description: 'No specific line — attach to the top of the file', action: 'fileNote' },
-        { label: rec.status === 'resolved' ? '$(debug-restart) Reopen' : '$(check) Resolve', action: 'toggleResolve' },
+        { label: resolved ? '$(debug-restart) Reopen' : '$(check) Resolve', action: 'toggleResolve' },
         { label: '$(trash) Delete', action: 'delete' },
     ];
 
@@ -2474,7 +2357,7 @@ async function showDriftedActions(id: number) {
     switch (pick.action) {
         case 'showContext':
             vscode.window.showInformationMessage(
-                rec.anchorContext ? `Original context:\n${rec.anchorContext}` : 'No stored context for this comment.',
+                meta.anchorContext ? `Original context:\n${meta.anchorContext}` : 'No stored context for this comment.',
                 { modal: true }
             );
             break;
@@ -2485,19 +2368,18 @@ async function showDriftedActions(id: number) {
             await searchAgainForDrifted(id);
             break;
         case 'fileNote':
-            await keepDriftedAsFileNote(id);
+            keepDriftedAsFileNote(id);
             break;
         case 'toggleResolve':
-            rec.status = rec.status === 'resolved' ? 'open' : 'resolved';
-            rec.updatedAt = new Date().toISOString();
-            refreshGhost(id);
-            queueSaveForUri(uri);
+            if (resolved) unresolveThread(thread); else resolveThread(thread);
+            queueSaveForThread(thread);
             refresh();
             break;
         case 'delete': {
             const answer = await vscode.window.showWarningMessage('Delete this drifted comment?', { modal: true }, 'Delete');
             if (answer !== 'Delete') break;
-            dropDrifted(id);
+            threadMap.delete(id);
+            thread.dispose();
             queueSaveForUri(uri);
             refresh();
             break;
@@ -2507,32 +2389,30 @@ async function showDriftedActions(id: number) {
 
 /** Re-run the drift ladder against the file's current content, in case the code came back (a rebase finishing, a branch switched back). */
 async function searchAgainForDrifted(id: number) {
-    const rec = driftedMap.get(id);
-    if (!rec) return;
-    const uri = vscode.Uri.parse(rec.uri);
+    const found = driftedThread(id);
+    if (!found) return;
+    const uri = found.thread.uri;
     if (uri.scheme !== 'file' || !fs.existsSync(uri.fsPath)) {
         vscode.window.showInformationMessage('That file does not exist any more.');
         return;
     }
-    // Without a stored anchorHash (this record predates anchoring, or was
-    // hand-created) there is nothing to search for — only an exact re-attach applies.
-    const doc = await vscode.workspace.openTextDocument(uri);
+    // Without a stored anchorHash (dropped when the thread drifted) there is
+    // nothing to search for — only an exact re-attach applies.
     vscode.window.showInformationMessage('Diff Review: no stored anchor to search for — use Re-attach instead to pick the line by hand.');
-    void doc;
 }
 
 /** Opens the file and lets the user confirm the current cursor position as the new anchor. */
 async function reattachDrifted(id: number) {
-    const rec = driftedMap.get(id);
-    if (!rec) return;
-    const uri = vscode.Uri.parse(rec.uri);
+    const found = driftedThread(id);
+    if (!found) return;
+    const uri = found.thread.uri;
     if (uri.scheme !== 'file' || !fs.existsSync(uri.fsPath)) {
         vscode.window.showWarningMessage('Diff Review: that file no longer exists.');
         return;
     }
 
     const doc = await vscode.workspace.openTextDocument(uri);
-    const editor = await vscode.window.showTextDocument(doc);
+    await vscode.window.showTextDocument(doc);
     const choice = await vscode.window.showInformationMessage(
         'Place your cursor on the line this comment refers to, then confirm.',
         'Confirm', 'Cancel'
@@ -2544,14 +2424,14 @@ async function reattachDrifted(id: number) {
         vscode.window.showWarningMessage('Diff Review: the active editor changed — try again from the same file.');
         return;
     }
-    const line = active.selection.active.line;
-    finishReattach(id, uri, line);
-    void editor;
+    finishReattach(id, uri, active.selection.active.line);
 }
 
+/** The user vouched for a line: clear the drift and re-anchor there. */
 function finishReattach(id: number, uri: vscode.Uri, line: number) {
-    const rec = driftedMap.get(id);
-    if (!rec || !activeController) return;
+    const found = driftedThread(id);
+    if (!found) return;
+    const { thread, meta } = found;
 
     let anchor: { anchorHash: string; anchorContext: string } | undefined;
     try {
@@ -2562,59 +2442,49 @@ function finishReattach(id: number, uri: vscode.Uri, line: number) {
         }
     } catch { /* best effort */ }
 
-    const range = new vscode.Range(line, 0, line, 0);
-    const thread = activeController.createCommentThread(uri, range, []);
-    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
-    thread.canReply = true;
-    if (rec.status === 'resolved') {
-        thread.label = '✅ Resolved'; thread.contextValue = 'resolved';
-        thread.state = vscode.CommentThreadState.Resolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
-    } else {
-        thread.label = 'Open'; thread.contextValue = 'open';
-        thread.state = vscode.CommentThreadState.Unresolved;
-        thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-    }
-    trackThread(thread, id, anchor);
-    dropDrifted(id);
+    thread.range = new vscode.Range(line, 0, line, 0);
+    meta.drift = undefined;
+    meta.fileNote = false;
+    meta.anchorHash = anchor?.anchorHash;
+    meta.anchorContext = anchor?.anchorContext ?? meta.anchorContext;
+    present(thread);
+    touchThread(thread);
     refresh();
     queueSaveForThread(thread);
     vscode.window.showInformationMessage('Diff Review: comment re-attached.');
 }
 
 /** Accept a drifted comment as file-level — anchored at line 0 with no further drift checking. */
-async function keepDriftedAsFileNote(id: number) {
-    const rec = driftedMap.get(id);
-    if (!rec || !activeController) return;
-    const uri = vscode.Uri.parse(rec.uri);
-    const range = new vscode.Range(0, 0, 0, 0);
-    const thread = activeController.createCommentThread(uri, range, []);
-    thread.comments = rec.comments.map(c => new ReviewComment(c.body, c.role, c.id, c.timestamp));
-    thread.canReply = true;
-    thread.label = rec.status === 'resolved' ? '✅ Resolved (file note)' : 'Open (file note)';
-    thread.contextValue = rec.status === 'resolved' ? 'resolved' : 'open';
-    thread.state = rec.status === 'resolved' ? vscode.CommentThreadState.Resolved : vscode.CommentThreadState.Unresolved;
-    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
-    trackThread(thread, id); // no anchor — this thread is intentionally exempt from future drift checks
-    dropDrifted(id);
+function keepDriftedAsFileNote(id: number) {
+    const found = driftedThread(id);
+    if (!found) return;
+    const { thread, meta } = found;
+    thread.range = new vscode.Range(0, 0, 0, 0);
+    meta.drift = undefined;
+    // No anchor: this thread is intentionally exempt from future drift checks.
+    meta.anchorHash = undefined;
+    meta.fileNote = true;
+    present(thread);
+    touchThread(thread);
     refresh();
     queueSaveForThread(thread);
 }
 
 async function reattachAllInFile(fileKey: string) {
-    const byDriftedFile = getDriftedByFile();
-    const recs = byDriftedFile.get(fileKey);
-    if (!recs || recs.length === 0) return;
-    for (const rec of [...recs]) {
-        if (!driftedMap.has(rec.id)) continue; // handled by a previous iteration (e.g. deleted)
-        await showDriftedActions(rec.id);
+    const ids = driftedEntries()
+        .filter(e => vscode.workspace.asRelativePath(e.thread.uri) === fileKey)
+        .map(e => e.id);
+    for (const id of ids) {
+        // A previous iteration may have re-attached or deleted this one.
+        if (!driftedThread(id)) continue;
+        await showDriftedActions(id);
     }
 }
 
 // --------------- Submit All ---------------
 
 async function submitAll() {
-    const openThreads = [...threadMap.values()].filter(t => t.contextValue !== 'resolved');
+    const openThreads = liveThreads().filter(isOpenLive);
     if (openThreads.length === 0) {
         vscode.window.showInformationMessage('No open review comments to submit.');
         return;
@@ -2856,8 +2726,8 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
         _options: vscode.LanguageModelToolInvocationOptions<{}>,
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        outputLog.appendLine(`[Diff Review] Comments listed via LM tool (${threadMap.size} open, ${driftedMap.size} drifted)`);
-        if (threadMap.size === 0 && driftedMap.size === 0) {
+        outputLog.appendLine(`[Diff Review] Comments listed via LM tool (${threadMap.size} comment(s), ${driftedCount()} drifted)`);
+        if (threadMap.size === 0) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('No review comments.')
             ]);
@@ -2865,19 +2735,17 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
         const lines: string[] = [];
         for (const [id, thread] of threadMap) {
             const rel = vscode.workspace.asRelativePath(thread.uri);
-            const line = thread.range.start.line + 1;
-            const status = thread.contextValue === 'resolved' ? 'RESOLVED' : 'OPEN';
+            const status = statusOfContextValue(thread.contextValue).toUpperCase();
             const comments = thread.comments.map(c => {
                 const role = (c as ReviewComment).role || 'user';
                 const text = typeof c.body === 'string' ? c.body : c.body.value;
                 return `  [${role}] ${text}`;
             }).join('\n');
-            lines.push(`#${id} | ${rel}:${line} | ${status}\n${comments}`);
-        }
-        for (const [id, rec] of driftedMap) {
-            const rel = vscode.workspace.asRelativePath(vscode.Uri.parse(rec.uri));
-            const comments = rec.comments.map(c => `  [${c.role}] ${c.body}`).join('\n');
-            lines.push(`#${id} | DRIFTED (was ${rel}:${rec.lastKnownLine + 1}) | ${rec.status.toUpperCase()}\n${comments}`);
+            const lastKnown = threadMeta.get(thread)?.drift?.lastKnownLine;
+            const where = lastKnown !== undefined
+                ? `DRIFTED (was ${rel}:${lastKnown + 1})`
+                : `${rel}:${thread.range.start.line + 1}`;
+            lines.push(`#${id} | ${where} | ${status}\n${comments}`);
         }
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(lines.join('\n\n'))
@@ -2893,30 +2761,23 @@ class ReplyToCommentTool implements vscode.LanguageModelTool<ReplyParams> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId, text } = options.input;
-        const found = findThreadOrDrifted(commentId);
-        if (!found) {
+        const thread = threadMap.get(commentId);
+        if (!thread) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        if (found.kind === 'live') {
-            const reply = new ReviewComment(text, 'agent');
-            found.thread.comments = [...found.thread.comments, reply];
-            found.thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-            touchThread(found.thread);
-            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool) at ${vscode.workspace.asRelativePath(found.thread.uri)}:${found.thread.range.start.line + 1}`);
-            queueSaveForThread(found.thread);
-            return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent.`)
-            ]);
-        }
-        const comment: SerializedComment = { id: nextCommentId++, role: 'agent', body: text, timestamp: new Date().toISOString() };
-        found.rec.comments.push(comment);
-        found.rec.updatedAt = comment.timestamp;
-        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool, drifted) at ${found.rec.uri}`);
-        queueSaveForUri(vscode.Uri.parse(found.rec.uri));
+        const drifted = isDrifted(thread);
+        const reply = new ReviewComment(text, 'agent');
+        thread.comments = [...thread.comments, reply];
+        if (!drifted) thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+        touchThread(thread);
+        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
+        queueSaveForThread(thread);
         return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart(`Replied to comment #${commentId} as agent. Note: this thread is DRIFTED — its original location was not found, so the reply may no longer be actionable at a specific line.`)
+            new vscode.LanguageModelTextPart(drifted
+                ? `Replied to comment #${commentId} as agent. Note: this thread is DRIFTED — its original location was not found, so the reply may no longer be actionable at a specific line.`
+                : `Replied to comment #${commentId} as agent.`)
         ]);
     }
 }
@@ -2929,24 +2790,16 @@ class ResolveCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId } = options.input;
-        const found = findThreadOrDrifted(commentId);
-        if (!found) {
+        const thread = threadMap.get(commentId);
+        if (!thread) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        if (found.kind === 'live') {
-            resolveThread(found.thread);
-            refresh();
-            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool) at ${vscode.workspace.asRelativePath(found.thread.uri)}`);
-            queueSaveForThread(found.thread);
-        } else {
-            found.rec.status = 'resolved';
-            found.rec.updatedAt = new Date().toISOString();
-            refreshGhost(commentId);
-            outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool, drifted) at ${found.rec.uri}`);
-            queueSaveForUri(vscode.Uri.parse(found.rec.uri));
-        }
+        resolveThread(thread);
+        refresh();
+        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+        queueSaveForThread(thread);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} resolved.`)
         ]);
@@ -2959,24 +2812,19 @@ class DeleteCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
         const { commentId } = options.input;
-        const found = findThreadOrDrifted(commentId);
-        if (!found) {
+        const thread = threadMap.get(commentId);
+        if (!thread) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Comment #${commentId} not found.`)
             ]);
         }
-        if (found.kind === 'live') {
-            threadMap.delete(commentId);
-            const uri = found.thread.uri;
-            found.thread.dispose();
-            refresh();
-            outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool at ${vscode.workspace.asRelativePath(uri)}`);
-            queueSaveForUri(uri);
-        } else {
-            dropDrifted(commentId);
-            outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool (drifted) at ${found.rec.uri}`);
-            queueSaveForUri(vscode.Uri.parse(found.rec.uri));
-        }
+        const uri = thread.uri;
+        const wasDrifted = isDrifted(thread);
+        threadMap.delete(commentId);
+        thread.dispose();
+        refresh();
+        outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
+        queueSaveForUri(uri);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} deleted.`)
         ]);

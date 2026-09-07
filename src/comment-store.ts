@@ -148,14 +148,19 @@ export function findAnchorLine(
     return undefined;
 }
 
-// --------------- Ghost (drifted-but-visible) threads ---------------
+// --------------- Thread presentation ---------------
 
 /**
- * A drifted comment keeps a `vscode.CommentThread` so it stays visible in the
- * Comments panel, but that thread is deliberately not tracked as a live one:
- * its line is the last place the anchor was seen, not a position we still
- * trust. These helpers are the single definition of that distinction, kept
- * here — free of the `vscode` import — so they can be tested directly.
+ * A comment lives in exactly one place — a `vscode.CommentThread` tracked by
+ * id. Drift is a *property* of that thread, not a separate container: a
+ * drifted comment is one whose line the anchor ladder no longer vouches for,
+ * so it must be skipped by anything that shifts or re-verifies positions, but
+ * it is otherwise an ordinary thread that replies, resolves and serializes
+ * like any other.
+ *
+ * `presentationFor` is the single definition of how each combination looks in
+ * the Comments panel, so no call site has to assemble a label and a
+ * contextValue by hand and risk the two disagreeing.
  */
 
 /** The shape a live `ReviewComment` presents to the persistence layer. */
@@ -175,39 +180,52 @@ export function serializeComments(comments: readonly LiveComment[]): SerializedC
     }));
 }
 
-export function ghostContextValue(status: ThreadStatus): string {
-    return status === 'resolved' ? 'drifted-resolved' : 'drifted-open';
+export interface ThreadView {
+    status: ThreadStatus;
+    /** Set only when drifted: the line the anchor was last seen on. */
+    lastKnownLine?: number;
+    /** A comment deliberately kept at file level, exempt from drift checking. */
+    fileNote?: boolean;
 }
 
-export function isGhostContextValue(contextValue: string | undefined): boolean {
+export interface Presentation {
+    label: string;
+    contextValue: string;
+    resolved: boolean;
+    collapsed: boolean;
+}
+
+export function presentationFor(view: ThreadView): Presentation {
+    const drifted = view.lastKnownLine !== undefined;
+    const resolved = view.status === 'resolved';
+
+    let label: string;
+    if (drifted) {
+        const where = `(was L${view.lastKnownLine! + 1})`;
+        label = resolved ? `✅ Resolved · ⚠ Moved ${where}` : `⚠ Moved — anchor not found ${where}`;
+    } else if (view.fileNote) {
+        label = resolved ? '✅ Resolved (file note)' : 'Open (file note)';
+    } else {
+        label = resolved ? '✅ Resolved' : 'Open';
+    }
+
+    return {
+        label,
+        contextValue: drifted
+            ? (resolved ? 'drifted-resolved' : 'drifted-open')
+            : (resolved ? 'resolved' : 'open'),
+        resolved,
+        // Only a live, open comment wants the reader's attention expanded.
+        collapsed: resolved || drifted || !!view.fileNote,
+    };
+}
+
+/** True for the contextValues `presentationFor` gives a drifted thread. Guards every position-shifting path. */
+export function isDriftedContextValue(contextValue: string | undefined): boolean {
     return contextValue === 'drifted-open' || contextValue === 'drifted-resolved';
 }
 
-/** Reads the status out of either vocabulary — 'open'/'resolved' for live threads, 'drifted-*' for ghosts. */
+/** Reads the status out of either vocabulary — 'open'/'resolved' for live threads, 'drifted-*' for drifted ones. */
 export function statusOfContextValue(contextValue: string | undefined): ThreadStatus {
     return contextValue === 'resolved' || contextValue === 'drifted-resolved' ? 'resolved' : 'open';
-}
-
-export function ghostLabel(lastKnownLine: number, status: ThreadStatus): string {
-    const where = `(was L${lastKnownLine + 1})`;
-    return status === 'resolved'
-        ? `✅ Resolved · ⚠ Moved ${where}`
-        : `⚠ Moved — anchor not found ${where}`;
-}
-
-/**
- * Mirror a ghost thread's conversation and status back into the drifted record
- * that owns it — the record, not the thread, is what gets serialized. The
- * position is pointedly not updated: replying to a drifted comment does not
- * make its line trustworthy again, only re-attaching does.
- */
-export function applyGhostEdit(
-    rec: { comments: SerializedComment[]; status: ThreadStatus; updatedAt: string },
-    comments: readonly LiveComment[],
-    contextValue: string | undefined,
-    now: string,
-): void {
-    rec.comments = serializeComments(comments);
-    rec.status = statusOfContextValue(contextValue);
-    rec.updatedAt = now;
 }
