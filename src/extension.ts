@@ -146,6 +146,14 @@ function trackThread(thread: vscode.CommentThread, id?: number, meta?: Partial<T
     // persisted id, so the counter must be kept ahead of every id we have
     // ever seen, not just ones minted in this session.
     if (tid >= nextThreadId) nextThreadId = tid + 1;
+    // Overwriting the map entry alone would strand the previous thread:
+    // untracked by every code path, yet still rendered by VS Code.
+    const previous = threadMap.get(tid);
+    if (previous && previous !== thread) {
+        threadIds.delete(previous);
+        threadMeta.delete(previous);
+        previous.dispose();
+    }
     threadMap.set(tid, thread);
     threadIds.set(thread, tid);
     threadMeta.set(thread, { updatedAt: new Date().toISOString(), ...meta });
@@ -209,6 +217,11 @@ let extensionContext: vscode.ExtensionContext;
 let activeController: vscode.CommentController | undefined;
 let outputLog: vscode.OutputChannel;
 
+/** Every output-channel line goes through here, so each carries a UTC timestamp. */
+function log(message: string) {
+    outputLog.appendLine(`[${new Date().toISOString()}] ${message}`);
+}
+
 function refresh() {
     const n = threadMap.size;
     const open = [...threadMap.values()].filter(t => statusOfContextValue(t.contextValue) === 'open').length;
@@ -260,6 +273,8 @@ interface FolderInfo {
     watcher?: vscode.FileSystemWatcher;
     /** The matching `vscode.git` repository, once found. */
     repo?: any;
+    /** In-flight `classifyFolder` run, so a repo opening mid-classification joins it instead of starting a second one. */
+    classifying?: Promise<void>;
 }
 
 const PENDING_TIMEOUT_MS = 10_000;
@@ -329,13 +344,27 @@ function globalStorageRoot(): string {
  * worthwhile, never the scope id itself, so a hand-rolled walk can never
  * disagree with the extension about where a repo's root actually is.
  */
-async function classifyFolder(folder: FolderInfo): Promise<void> {
+function classifyFolder(folder: FolderInfo): Promise<void> {
+    // A repo can open while this folder is still in its `pending` poll loop,
+    // and the `onDidOpenRepository` handler would then start a second
+    // classification of the same folder. Both would settle it, loading every
+    // persisted thread twice and leaving the first copy orphaned in the
+    // gutter. Join the run already in flight instead.
+    if (folder.classifying) return folder.classifying;
+    const run = classifyFolderInner(folder).finally(() => {
+        if (folder.classifying === run) folder.classifying = undefined;
+    });
+    folder.classifying = run;
+    return run;
+}
+
+async function classifyFolderInner(folder: FolderInfo): Promise<void> {
     const realPath = folder.realPath;
     if (!hasDotGitAbove(realPath)) {
         folder.state = 'plain';
         folder.scopeId = scopeIdMod.scopeIdForFolder(realPath);
         folder.branchKey = '_default';
-        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: plain (no .git found)`);
+        log(`[Diff Review] ${folder.folderPath}: plain (no .git found)`);
         settleFolder(folder);
         return;
     }
@@ -353,7 +382,7 @@ async function classifyFolder(folder: FolderInfo): Promise<void> {
         if (await tryResolveGitScope(folder)) return;
     }
 
-    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: git extension never reported this repo — degrading to plain`);
+    log(`[Diff Review] ${folder.folderPath}: git extension never reported this repo — degrading to plain`);
     folder.state = 'plain';
     folder.scopeId = scopeIdMod.scopeIdForFolder(realPath);
     folder.branchKey = '_default';
@@ -375,13 +404,16 @@ async function tryResolveGitScope(folder: FolderInfo): Promise<boolean> {
     const scope = gitScopeFor(repo.state, repoRealPath);
     if (!scope) return false;
 
+    const previousRepo = folder.repo;
     folder.repo = repo;
     folder.scopeId = scope.scopeId;
     folder.branchKey = scope.branchKey;
     folder.state = 'git';
-    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: git — scope ${folder.scopeId}, branch ${folder.branchKey}`);
+    log(`[Diff Review] ${folder.folderPath}: git — scope ${folder.scopeId}, branch ${folder.branchKey}`);
 
-    registerRepoWatcher(folder, repo);
+    // Re-registering on the same repo would stack a second `onDidChange`
+    // listener, doubling every later branch switch.
+    if (previousRepo !== repo) registerRepoWatcher(folder, repo);
     settleFolder(folder);
     return true;
 }
@@ -405,7 +437,7 @@ function registerRepoWatcher(folder: FolderInfo, repo: any) {
 
 /** The folder's scope id changed under us (see `registerRepoWatcher`): drop this scope's threads and re-settle onto the new scope file. */
 async function switchFolderScope(folder: FolderInfo, scope: { scopeId: string; branchKey: string }) {
-    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: scope ${folder.scopeId} → ${scope.scopeId}`);
+    log(`[Diff Review] ${folder.folderPath}: scope ${folder.scopeId} → ${scope.scopeId}`);
     await flushFolderSaveNow(folder);
 
     disposeFolderThreads(folder);
@@ -420,8 +452,11 @@ async function switchFolderScope(folder: FolderInfo, scope: { scopeId: string; b
 function settleFolder(folder: FolderInfo) {
     const filePath = path.join(scopeDirFor(folder.scopeId!), 'comments.json');
     folder.filePath = filePath;
-    outputLog.appendLine(`[Diff Review] ${vscode.Uri.file(folder.folderPath).toString()}: storage resolved to ${vscode.Uri.file(filePath).toString()}`);
+    log(`[Diff Review] ${vscode.Uri.file(folder.folderPath).toString()}: storage resolved to ${vscode.Uri.file(filePath).toString()}`);
     migrateLegacyStateIfPresent(folder);
+    // Idempotent: a re-settle (scope switch, or a repeat classification)
+    // must not stack a second copy of every thread on top of the first.
+    disposeFolderThreads(folder);
     loadFolderThreads(folder);
     refresh();
     if (folder.needsFlushOnSettle) {
@@ -489,9 +524,9 @@ function migrateLegacyStateIfPresent(folder: FolderInfo) {
         file.branches[folder.branchKey!] = branch;
         fs.mkdirSync(path.dirname(folder.filePath!), { recursive: true });
         fs.writeFileSync(folder.filePath!, JSON.stringify(file));
-        outputLog.appendLine(`[Diff Review] Migrated ${legacy.threads.length} thread(s) from legacy key ${key} into ${folder.scopeId}`);
+        log(`[Diff Review] Migrated ${legacy.threads.length} thread(s) from legacy key ${key} into ${folder.scopeId}`);
     } catch (e: any) {
-        outputLog.appendLine(`[Diff Review] Legacy migration skipped for ${folder.folderPath}: ${e.message}`);
+        log(`[Diff Review] Legacy migration skipped for ${folder.folderPath}: ${e.message}`);
     }
 }
 
@@ -504,7 +539,7 @@ function readScopeFileOrEmpty(filePath: string): ScopeFile {
         if (parsed && parsed.branches) return parsed as ScopeFile;
         throw new Error('malformed scope file');
     } catch (e: any) {
-        if (e.code !== 'ENOENT') outputLog.appendLine(`[Diff Review] Could not read ${filePath}, starting empty: ${e.message}`);
+        if (e.code !== 'ENOENT') log(`[Diff Review] Could not read ${filePath}, starting empty: ${e.message}`);
         return emptyScopeFile(writerId);
     }
 }
@@ -569,7 +604,7 @@ function scheduleSave(folder: FolderInfo, debounceMs = 0) {
     folder.saveTimer = setTimeout(() => {
         folder.saveTimer = undefined;
         writeChain = writeChain.then(() => performScopeSave(folder)).catch(err => {
-            outputLog.appendLine(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
+            log(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
         });
     }, debounceMs);
 }
@@ -612,7 +647,7 @@ async function performScopeSave(folder: FolderInfo): Promise<void> {
         folder.consecutiveSaveFailures = 0;
     } catch (e: any) {
         folder.consecutiveSaveFailures = (folder.consecutiveSaveFailures ?? 0) + 1;
-        outputLog.appendLine(`[Diff Review] Save error for ${folder.folderPath} (attempt ${folder.consecutiveSaveFailures}): ${e.message}`);
+        log(`[Diff Review] Save error for ${folder.folderPath} (attempt ${folder.consecutiveSaveFailures}): ${e.message}`);
         if (folder.consecutiveSaveFailures === 3) {
             vscode.window.showErrorMessage(
                 `Diff Review: comments in ${path.basename(folder.folderPath)} have failed to save ${folder.consecutiveSaveFailures} times in a row. Recent changes may be lost.`
@@ -655,7 +690,7 @@ function warnTransient(uri: vscode.Uri) {
     const key = uri.toString();
     if (!transientWarnedUris.has(key)) {
         transientWarnedUris.add(key);
-        outputLog.appendLine(`[Diff Review] A comment was added on a file outside any open workspace folder — it will not be saved: ${key}`);
+        log(`[Diff Review] A comment was added on a file outside any open workspace folder — it will not be saved: ${key}`);
     }
     refresh();
 }
@@ -735,13 +770,13 @@ function loadFolderThreads(folder: FolderInfo) {
     const branch = file.branches[folder.branchKey!];
     if (!branch || branch.threads.length === 0) return;
     for (const st of branch.threads) instantiateThread(folder, st);
-    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: loaded ${branch.threads.length} thread(s) for ${folder.branchKey}`);
+    log(`[Diff Review] ${folder.folderPath}: loaded ${branch.threads.length} thread(s) for ${folder.branchKey}`);
 }
 
 /** Branch changed in one repo: touches only that repo's threads (fixes the pre-F2 bug where switching branch in one repo wiped every repo's comments). */
 async function switchFolderBranch(folder: FolderInfo, newBranchKey: string) {
     const oldBranchKey = folder.branchKey!;
-    outputLog.appendLine(`[Diff Review] ${folder.folderPath}: branch ${oldBranchKey} → ${newBranchKey}`);
+    log(`[Diff Review] ${folder.folderPath}: branch ${oldBranchKey} → ${newBranchKey}`);
 
     // Must actually complete before the reload below reads the file back —
     // `writeChain` resolves later than this call returns, so without
@@ -758,12 +793,12 @@ async function switchFolderBranch(folder: FolderInfo, newBranchKey: string) {
     const newBranch = file.branches[newBranchKey];
     if (newBranch && newBranch.threads.length > 0) {
         for (const st of newBranch.threads) instantiateThread(folder, st);
-        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: loaded ${newBranch.threads.length} thread(s) for ${newBranchKey}`);
+        log(`[Diff Review] ${folder.folderPath}: loaded ${newBranch.threads.length} thread(s) for ${newBranchKey}`);
     } else {
         const oldBranch = file.branches[oldBranchKey];
         if (oldBranch && oldBranch.threads.length > 0) {
             for (const st of oldBranch.threads) instantiateThread(folder, st);
-            outputLog.appendLine(`[Diff Review] ${folder.folderPath}: inherited ${oldBranch.threads.length} thread(s) from ${oldBranchKey}`);
+            log(`[Diff Review] ${folder.folderPath}: inherited ${oldBranch.threads.length} thread(s) from ${oldBranchKey}`);
             scheduleSave(folder);
         }
     }
@@ -774,7 +809,7 @@ async function switchFolderBranch(folder: FolderInfo, newBranchKey: string) {
 async function flushFolderSaveNow(folder: FolderInfo): Promise<void> {
     if (folder.saveTimer) { clearTimeout(folder.saveTimer); folder.saveTimer = undefined; }
     const p = writeChain.then(() => performScopeSave(folder)).catch(err => {
-        outputLog.appendLine(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
+        log(`[Diff Review] Save failed for ${folder.folderPath}: ${err.message ?? err}`);
     });
     writeChain = p;
     await p;
@@ -787,7 +822,7 @@ function watchFolderScope(folder: FolderInfo) {
     const watcher = vscode.workspace.createFileSystemWatcher(pattern);
     const onExternalChange = () => {
         if (folder.suppressWatcherUntil && Date.now() < folder.suppressWatcherUntil) return; // our own write
-        outputLog.appendLine(`[Diff Review] ${folder.folderPath}: external change to ${folder.filePath}, reloading`);
+        log(`[Diff Review] ${folder.folderPath}: external change to ${folder.filePath}, reloading`);
         disposeFolderThreads(folder);
         loadFolderThreads(folder);
         refresh();
@@ -803,7 +838,7 @@ function watchFolderScope(folder: FolderInfo) {
 async function discoverFolders(): Promise<void> {
     const wsFolders = vscode.workspace.workspaceFolders ?? [];
     if (wsFolders.length === 0) {
-        outputLog.appendLine('[Diff Review] No workspace folder open — comments in this window will not be persisted.');
+        log('[Diff Review] No workspace folder open — comments in this window will not be persisted.');
         return;
     }
     for (const wf of wsFolders) {
@@ -825,7 +860,7 @@ async function discoverFolders(): Promise<void> {
 function setupBranchWatcher(context: vscode.ExtensionContext) {
     const gitExtension = vscode.extensions.getExtension('vscode.git');
     if (!gitExtension) {
-        outputLog.appendLine('[Diff Review] Git extension not found — branch scoping disabled for this window.');
+        log('[Diff Review] Git extension not found — branch scoping disabled for this window.');
         return;
     }
     activateGitApi().then(git => {
@@ -934,7 +969,7 @@ function driftThread(thread: vscode.CommentThread) {
     touchThread(thread);
     queueSaveForUri(thread.uri);
     refresh();
-    outputLog.appendLine(`[Diff Review] Thread #${id} drifted — its anchor is no longer found in the file.`);
+    log(`[Diff Review] Thread #${id} drifted — its anchor is no longer found in the file.`);
 }
 
 // --------------- IPC HTTP Server ---------------
@@ -970,7 +1005,7 @@ async function sweepStaleDescriptors(tmpDir: string): Promise<void> {
             const d = JSON.parse(fs.readFileSync(file, 'utf-8'));
             if (typeof d.port !== 'number' || !(await pingCandidate(d.port))) {
                 fs.unlinkSync(file);
-                outputLog.appendLine(`[Diff Review] Swept stale IPC descriptor ${entry}`);
+                log(`[Diff Review] Swept stale IPC descriptor ${entry}`);
             }
         } catch {
             try { fs.unlinkSync(file); } catch { /* already gone */ }
@@ -1006,7 +1041,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         status: isDrifted(t) ? 'drifted' : statusOfContextValue(t.contextValue),
                         comments: t.comments.map(c => ({ role: (c as ReviewComment).role, body: typeof c.body === 'string' ? c.body : c.body.value })),
                     }));
-                    outputLog.appendLine(`[Diff Review] Comments listed via IPC (${threads.length} thread(s))`);
+                    log(`[Diff Review] Comments listed via IPC (${threads.length} thread(s))`);
                     res.writeHead(200);
                     res.end(JSON.stringify({ threads }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
@@ -1020,7 +1055,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     thread.comments = [...thread.comments, reply];
                     if (!drifted) thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
                     touchThread(thread);
-                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (agent reply via IPC${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+                    log(`[Diff Review] Comment #${threadId} updated (agent reply via IPC${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
                     queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({
@@ -1045,7 +1080,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
                     resolveThread(thread);
                     refresh();
-                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (resolved via IPC${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+                    log(`[Diff Review] Comment #${threadId} updated (resolved via IPC${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
                     queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
@@ -1057,7 +1092,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     if (!thread) { res.writeHead(404); res.end(JSON.stringify({ error: `Thread #${threadId} not found` })); return; }
                     unresolveThread(thread);
                     refresh();
-                    outputLog.appendLine(`[Diff Review] Comment #${threadId} updated (unresolved via IPC) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+                    log(`[Diff Review] Comment #${threadId} updated (unresolved via IPC) at ${vscode.workspace.asRelativePath(thread.uri)}`);
                     queueSaveForThread(thread);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
@@ -1072,7 +1107,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     threadMap.delete(threadId);
                     thread.dispose();
                     refresh();
-                    outputLog.appendLine(`[Diff Review] Comment #${threadId} deleted via IPC${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
+                    log(`[Diff Review] Comment #${threadId} deleted via IPC${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
                     queueSaveForUri(uri);
                     res.writeHead(200);
                     res.end(JSON.stringify({ ok: true }));
@@ -1114,7 +1149,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                 // should resolve through the descriptor directory above.
                 const legacyPortFile = path.join(tmpDir, 'diff-review-port');
                 fs.writeFileSync(legacyPortFile, String(ipcPort), 'utf-8');
-                outputLog.appendLine('[Diff Review] (deprecated) also wrote the legacy global port file — MCP clients should resolve via the per-window descriptor directory.');
+                log('[Diff Review] (deprecated) also wrote the legacy global port file — MCP clients should resolve via the per-window descriptor directory.');
 
                 resolve(ipcPort);
             } else {
@@ -1161,10 +1196,10 @@ function deployMcpLauncher(context: vscode.ExtensionContext) {
         const source = path.join(context.extensionPath, 'out', 'mcp-launcher.js');
         fs.copyFileSync(source, LAUNCHER_FILE);
 
-        outputLog.appendLine(`[Diff Review] MCP launcher ready at ${LAUNCHER_FILE}`);
+        log(`[Diff Review] MCP launcher ready at ${LAUNCHER_FILE}`);
     } catch (err) {
         // Non-fatal: everything except the MCP integration still works.
-        outputLog.appendLine(`[Diff Review] Could not deploy MCP launcher: ${err}`);
+        log(`[Diff Review] Could not deploy MCP launcher: ${err}`);
     }
 }
 
@@ -1181,7 +1216,7 @@ function deployStoragePathPointer() {
         fs.mkdirSync(STATE_DIR, { recursive: true });
         fs.writeFileSync(path.join(STATE_DIR, 'storage-path'), globalStorageRoot(), 'utf-8');
     } catch (err) {
-        outputLog.appendLine(`[Diff Review] Could not write storage-path pointer: ${err}`);
+        log(`[Diff Review] Could not write storage-path pointer: ${err}`);
     }
 }
 
@@ -1361,10 +1396,10 @@ async function showMcpInfo(context: vscode.ExtensionContext) {
 export function activate(context: vscode.ExtensionContext) {
     extensionContext = context;
     outputLog = vscode.window.createOutputChannel('Diff Review');
-    outputLog.appendLine('[Diff Review] Activating...');
+    log('[Diff Review] Activating...');
     const globalStoragePath = vscode.Uri.file(
         context.globalStorageUri.fsPath.replace('vscode-userdata:', '')).toString()
-    outputLog.appendLine(`[Diff Review] Global storage: ${globalStoragePath}`);
+    log(`[Diff Review] Global storage: ${globalStoragePath}`);
 
     const controller = vscode.comments.createCommentController('diffReview', 'Diff Review');
     activeController = controller;
@@ -1402,9 +1437,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- IPC Server ---
     startIpcServer(context).then(port => {
-        outputLog.appendLine(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
+        log(`[Diff Review] IPC server listening on 127.0.0.1:${port}`);
     }).catch(err => {
-        outputLog.appendLine(`[Diff Review] Failed to start IPC server: ${err}`);
+        log(`[Diff Review] Failed to start IPC server: ${err}`);
     });
 
     // --- Create comment (first comment in a new thread) ---
@@ -1418,7 +1453,7 @@ export function activate(context: vscode.ExtensionContext) {
             const anchor = computeAnchorForNewThread(thread);
             const tid = trackThread(thread, undefined, anchor);
             present(thread, 'open');
-            outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
+            log(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             refresh();
             queueSaveForThread(thread);
         })
@@ -1431,7 +1466,7 @@ export function activate(context: vscode.ExtensionContext) {
             const comment = new ReviewComment(reply.text, 'user');
             thread.comments = [...thread.comments, comment];
             touchThread(thread);
-            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (reply added) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
+            log(`[Diff Review] Comment #${threadIds.get(thread)} updated (reply added) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             queueSaveForThread(thread);
         })
     );
@@ -1466,7 +1501,7 @@ export function activate(context: vscode.ExtensionContext) {
                 return c;
             });
             touchThread(thread);
-            outputLog.appendLine(`[Diff Review] Comment #${comment.id} updated (edit saved) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
+            log(`[Diff Review] Comment #${comment.id} updated (edit saved) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
             queueSaveForThread(thread);
         })
     );
@@ -1497,13 +1532,13 @@ export function activate(context: vscode.ExtensionContext) {
             if (thread.comments.length <= 1) {
                 untrackThread(thread);
                 thread.dispose();
-                outputLog.appendLine(`[Diff Review] Comment #${tid} deleted (last comment, thread removed) at ${vscode.workspace.asRelativePath(uri)}`);
+                log(`[Diff Review] Comment #${tid} deleted (last comment, thread removed) at ${vscode.workspace.asRelativePath(uri)}`);
             } else {
                 thread.comments = thread.comments.filter(
                     c => (c as ReviewComment).id !== comment.id
                 );
                 touchThread(thread);
-                outputLog.appendLine(`[Diff Review] Comment #${comment.id} deleted from thread #${tid} at ${vscode.workspace.asRelativePath(uri)}`);
+                log(`[Diff Review] Comment #${comment.id} deleted from thread #${tid} at ${vscode.workspace.asRelativePath(uri)}`);
             }
             refresh();
             queueSaveForUri(uri);
@@ -1527,7 +1562,7 @@ export function activate(context: vscode.ExtensionContext) {
             const tid = threadIds.get(thread);
             untrackThread(thread);
             thread.dispose();
-            outputLog.appendLine(`[Diff Review] Comment #${tid} deleted (whole thread, ${count} comment(s)) at ${vscode.workspace.asRelativePath(uri)}`);
+            log(`[Diff Review] Comment #${tid} deleted (whole thread, ${count} comment(s)) at ${vscode.workspace.asRelativePath(uri)}`);
             refresh();
             queueSaveForUri(uri);
         })
@@ -1551,7 +1586,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.resolve', (thread: vscode.CommentThread) => {
             resolveThread(thread);
             refresh();
-            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (resolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+            log(`[Diff Review] Comment #${threadIds.get(thread)} updated (resolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
             queueSaveForThread(thread);
         })
     );
@@ -1561,7 +1596,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.unresolve', (thread: vscode.CommentThread) => {
             unresolveThread(thread);
             refresh();
-            outputLog.appendLine(`[Diff Review] Comment #${threadIds.get(thread)} updated (unresolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+            log(`[Diff Review] Comment #${threadIds.get(thread)} updated (unresolved) at ${vscode.workspace.asRelativePath(thread.uri)}`);
             queueSaveForThread(thread);
         })
     );
@@ -1787,7 +1822,7 @@ function createCommentThreadAt(uri: vscode.Uri, startLine0: number, endLine0: nu
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
     const anchor = computeAnchorForNewThread(thread);
     const tid = trackThread(thread, undefined, anchor);
-    outputLog.appendLine(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(uri)}:${startLine0 + 1}`);
+    log(`[Diff Review] Comment #${tid} created at ${vscode.workspace.asRelativePath(uri)}:${startLine0 + 1}`);
     refresh();
     queueSaveForThread(thread);
     return { threadId: tid };
@@ -1855,7 +1890,7 @@ async function registerWithConsumer(target: McpConsumerTarget) {
             if (picked === action) { vscode.commands.executeCommand('diffReview.installAgentCommands'); }
         });
     } catch (err: any) {
-        outputLog.appendLine(`[Diff Review] register failed for ${target.id}: ${err.message}`);
+        log(`[Diff Review] register failed for ${target.id}: ${err.message}`);
         await copySnippet(target);
         vscode.window.showWarningMessage(
             `Diff Review: could not write ${homeShort(target.configPath)} (${err.message}). ` +
@@ -2009,7 +2044,7 @@ async function installSlashCommands(target: SlashCommandTarget) {
             (backups.length > 0 ? ` Previous version(s) saved to ${backups.map(w => homeShort(w.backup!)).join(', ')}.` : ''));
     }
     if (outcome.errors.length > 0) {
-        outputLog.appendLine(
+        log(
             `[Diff Review] installSlashCommands failed for ${target.id}: ${outcome.errors.map(e => e.message).join('; ')}`);
         vscode.window.showWarningMessage(
             `Diff Review: could not write ${outcome.errors.map(e => homeShort(e.filePath)).join(', ')} ` +
@@ -2712,7 +2747,7 @@ class CreateCommentTool implements vscode.LanguageModelTool<CreateCommentParams>
         if ('error' in result) {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(result.error)]);
         }
-        outputLog.appendLine(`[Diff Review] Comment #${result.threadId} created via LM tool at ${relPath}:${line}`);
+        log(`[Diff Review] Comment #${result.threadId} created via LM tool at ${relPath}:${line}`);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Created comment thread #${result.threadId} at ${relPath}:${line}.`)
         ]);
@@ -2724,7 +2759,7 @@ class ListCommentsTool implements vscode.LanguageModelTool<{}> {
         _options: vscode.LanguageModelToolInvocationOptions<{}>,
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelToolResult> {
-        outputLog.appendLine(`[Diff Review] Comments listed via LM tool (${threadMap.size} comment(s), ${driftedCount()} drifted)`);
+        log(`[Diff Review] Comments listed via LM tool (${threadMap.size} comment(s), ${driftedCount()} drifted)`);
         if (threadMap.size === 0) {
             return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart('No review comments.')
@@ -2770,7 +2805,7 @@ class ReplyToCommentTool implements vscode.LanguageModelTool<ReplyParams> {
         thread.comments = [...thread.comments, reply];
         if (!drifted) thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
         touchThread(thread);
-        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
+        log(`[Diff Review] Comment #${commentId} updated (agent reply via LM tool${drifted ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}:${thread.range.start.line + 1}`);
         queueSaveForThread(thread);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(drifted
@@ -2796,7 +2831,7 @@ class ResolveCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         }
         resolveThread(thread);
         refresh();
-        outputLog.appendLine(`[Diff Review] Comment #${commentId} updated (resolved via LM tool${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
+        log(`[Diff Review] Comment #${commentId} updated (resolved via LM tool${isDrifted(thread) ? ', drifted' : ''}) at ${vscode.workspace.asRelativePath(thread.uri)}`);
         queueSaveForThread(thread);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} resolved.`)
@@ -2821,7 +2856,7 @@ class DeleteCommentTool implements vscode.LanguageModelTool<CommentIdParam> {
         threadMap.delete(commentId);
         thread.dispose();
         refresh();
-        outputLog.appendLine(`[Diff Review] Comment #${commentId} deleted via LM tool${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
+        log(`[Diff Review] Comment #${commentId} deleted via LM tool${wasDrifted ? ' (drifted)' : ''} at ${vscode.workspace.asRelativePath(uri)}`);
         queueSaveForUri(uri);
         return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Comment #${commentId} deleted.`)
