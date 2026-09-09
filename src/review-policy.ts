@@ -64,14 +64,13 @@ export function addressSteps({ tools, threadRef }: PolicyOptions): { heading: st
     const identify = threadRef === 'inline'
         ? 'Each comment heading carries its thread ID as "(Thread #N)"; use that N as the threadId ' +
           'for the tools below.'
-        : 'Work them oldest-first.';
+        : 'Go through them oldest-first.';
 
     return [
         {
-            heading: 'Work each open thread',
-            body: `${identify} Read the full thread and the surrounding context. Determine whether the ` +
-                'comment requests a discussion, a design-document revision, or an implementation change, ' +
-                'then act on it.',
+            heading: 'Inspect each open thread',
+            body: `${identify} Read the full thread and the surrounding context, then decide how to ` +
+                'handle it — answer, edit a doc, or change code.',
         },
         {
             heading: 'Reply to every thread you touch',

@@ -33,7 +33,7 @@ export const MARKER: Record<CommandId, string> = {
 
 const DESCRIPTION: Record<CommandId, string> = {
     perform: 'Review the current branch against its merge-base and leave inline Diff Review comments on what you find',
-    address: 'Work every open Diff Review comment thread: address it in code, reply, and resolve',
+    address: 'Work every open Diff Review comment thread: reply, and change code where asked',
 };
 
 const ALLOWED_TOOLS: Record<CommandId, string> = {
