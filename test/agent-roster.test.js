@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { AgentRoster, resolveBinding, codexThreadIdFromMeta } = require('../out/test/agent-roster.js');
+const { AgentRoster, resolveBinding, codexThreadIdFromMeta, claudePidFromSocketPath } = require('../out/test/agent-roster.js');
 const session = (id, recency) => ({ agent: 'codex', sessionId: id, label: id, cwd: '/work', recency });
 
 test('registration is idempotent and preserves registeredAt', () => {
@@ -45,4 +45,12 @@ test('direct Codex thread ID wins and malformed metadata is ignored', () => {
     }), 'thread-direct');
     assert.equal(codexThreadIdFromMeta({ threadId: '', 'x-codex-turn-metadata': 'bad' }), undefined);
     assert.equal(codexThreadIdFromMeta(undefined), undefined);
+});
+
+test('Claude PID is derived only from supported messaging socket paths', () => {
+    assert.equal(claudePidFromSocketPath('/tmp/cc-socks/22784.sock'), 22784);
+    assert.equal(claudePidFromSocketPath('/private/tmp/cc-socks-501/22784.sock'), 22784);
+    assert.equal(claudePidFromSocketPath('/run/user/501/cc-socks/22784.sock'), 22784);
+    assert.equal(claudePidFromSocketPath('/tmp/not-claude/22784.sock'), undefined);
+    assert.equal(claudePidFromSocketPath('/tmp/cc-socks/not-a-pid.sock'), undefined);
 });

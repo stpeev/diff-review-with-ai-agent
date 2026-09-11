@@ -367,17 +367,7 @@
         "canBeReferencedInPrompt": true,
         "inputSchema": { "type": "object", "properties": {} }
       }
-    ],
-    "configuration": {
-      "title": "Diff Review",
-      "properties": {
-        "diffReview.experimentalDirectDelivery": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable experimental private-protocol delivery to Claude Code sessions."
-        }
-      }
-    }
+    ]
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

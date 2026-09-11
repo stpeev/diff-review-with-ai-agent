@@ -48,3 +48,16 @@ export function codexThreadIdFromMeta(meta: Record<string, unknown> | undefined)
     const nested = fields.thread_id ?? fields.session_id;
     return typeof nested === 'string' && nested.length > 0 ? nested : undefined;
 }
+
+/**
+ * Claude's private messaging socket is named after the owning Claude process.
+ * Accept the local socket roots used by Claude Code on macOS/Linux/Termux, but
+ * do not accept an arbitrary path containing a numeric filename.
+ */
+export function claudePidFromSocketPath(socketPath: string | undefined): number | undefined {
+    if (!socketPath) return undefined;
+    const match = /^(?:\/(?:private\/)?tmp\/cc-socks(?:-\d+)?|\/run\/user\/\d+\/cc-socks|\/data\/data\/com\.termux\/files\/usr\/tmp\/cc-socks(?:-\d+)?)\/(\d+)\.sock$/.exec(socketPath);
+    if (!match) return undefined;
+    const pid = Number(match[1]);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}

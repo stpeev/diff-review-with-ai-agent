@@ -15,7 +15,7 @@ import { LM_TOOLS, MCP_TOOLS, PolicyTools, prosePolicy } from './review-policy';
 import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
-import { AgentRoster, AgentSession, resolveBinding } from './agent-roster';
+import { AgentRoster, AgentSession, claudePidFromSocketPath, resolveBinding } from './agent-roster';
 import { deliverToSession } from './agent-deliver';
 import {
     Role, ThreadStatus, SerializedComment, SerializedThread, BranchState, ScopeFile,
@@ -1146,19 +1146,23 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid agent session registration' })); return;
                     }
                     if (data.agent === 'claude') {
-                        const pid = Number(data.pid);
-                        const expectedSocket = new RegExp(`^/tmp/cc-socks(?:-${process.getuid?.()})?/${pid}\\.sock$`);
-                        let verified = Number.isInteger(pid) && pid > 0 && expectedSocket.test(String(data.socketPath ?? ''));
-                        try {
-                            process.kill(pid, 0);
-                            verified = verified && fs.statSync(data.socketPath).uid === process.getuid?.();
-                        } catch { verified = false; }
+                        const socketPath = String(data.socketPath ?? '');
+                        const socketPid = claudePidFromSocketPath(socketPath);
+                        const suppliedPid = data.pid === undefined ? socketPid : Number(data.pid);
+                        const pid = Number.isInteger(suppliedPid) && suppliedPid! > 0 ? suppliedPid : undefined;
+                        let verified = pid !== undefined && pid === socketPid && typeof data.token === 'string' && data.token.length > 0;
+                        if (verified && pid !== undefined) {
+                            try {
+                                process.kill(pid, 0);
+                                verified = fs.statSync(socketPath).uid === process.getuid?.();
+                            } catch { verified = false; }
+                        }
                         if (!verified) {
                             log(`[Diff Review] Rejected Claude session ${String(data.sessionId).slice(-6)}: identity verification failed`);
                             res.writeHead(400); res.end(JSON.stringify({ error: 'Claude session identity could not be verified' })); return;
                         }
                     }
-                    const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.pid });
+                    const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.agent === 'claude' ? claudePidFromSocketPath(data.socketPath) : data.pid });
                     log(`[Diff Review] Registered agent session ${sessionLogName(session)} (${agentRoster.list().length} active session(s))`);
                     res.writeHead(200); res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/reply') {

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as net from 'net';
 import { execFile } from 'child_process';
 import { AgentSession } from './agent-roster';
 
@@ -30,8 +31,64 @@ export function resolveCodexBinary(envPath = process.env.PATH ?? '', home = os.h
     return undefined;
 }
 
+/**
+ * Send the two NDJSON frames printed by Claude Code's own uds-messaging help:
+ * authenticate first, then enqueue a user message. This is a private protocol,
+ * so a successful result means the bytes reached the socket, not that Claude
+ * acknowledged or acted on them.
+ */
+export function deliverToClaude(session: AgentSession, message: string, timeoutMs = 5000): Promise<string> {
+    if (!session.socketPath || !session.token) {
+        return Promise.reject(new Error('Claude session did not publish a messaging socket and token'));
+    }
+    if (!message.trim()) return Promise.reject(new Error('Cannot deliver an empty message to Claude'));
+
+    const payload = [
+        JSON.stringify({ type: 'auth', token: session.token }),
+        JSON.stringify({
+            type: 'user',
+            session_id: session.sessionId,
+            message: { role: 'user', content: message },
+        }),
+        '',
+    ].join('\n');
+
+    return new Promise((resolve, reject) => {
+        const socket = net.createConnection({ path: session.socketPath! });
+        let settled = false;
+        let response = '';
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            if (error) {
+                socket.destroy();
+                reject(error);
+                return;
+            }
+            const frames = response.split('\n').flatMap(line => {
+                if (!line.trim()) return [];
+                try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+            });
+            const dropped = frames.find(frame => frame.type === 'peer_message_status' && frame.dropped === true);
+            if (dropped) {
+                reject(new Error(`Claude rejected the message${typeof dropped.drop_reason === 'string' ? `: ${dropped.drop_reason}` : ''}`));
+                return;
+            }
+            const acknowledged = frames.some(frame => frame.type === 'peer_message_status');
+            resolve(acknowledged ? 'accepted by Claude messaging socket' : 'written to Claude messaging socket (no protocol acknowledgement)');
+        };
+        socket.setTimeout(timeoutMs);
+        socket.once('timeout', () => finish(new Error(`Claude messaging socket timed out after ${timeoutMs}ms`)));
+        socket.once('error', error => finish(new Error(`Claude messaging socket failed: ${error.message}`)));
+        socket.setEncoding('utf8');
+        socket.on('data', chunk => { response += chunk; });
+        socket.once('connect', () => socket.end(payload));
+        socket.once('close', hadError => { if (!hadError) finish(); });
+    });
+}
+
 export function deliverToSession(session: AgentSession, message: string): Promise<string> {
-    if (session.agent !== 'codex') return Promise.reject(new Error('Claude direct delivery is experimental and unavailable'));
+    if (session.agent === 'claude') return deliverToClaude(session, message);
     const binary = resolveCodexBinary();
     if (!binary) return Promise.reject(new Error('Codex executable not found'));
     return new Promise((resolve, reject) => execFile(binary, ['queue', '--thread', session.sessionId, '--message', message],

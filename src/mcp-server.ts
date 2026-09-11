@@ -21,7 +21,7 @@ import {
     Descriptor, descriptorDir, resolvePort, ResolveResult,
     NoServerError, AmbiguousPortError,
 } from './ipc-discovery';
-import { codexThreadIdFromMeta } from './agent-roster';
+import { claudePidFromSocketPath, codexThreadIdFromMeta } from './agent-roster';
 import { diagnosticEnvironment, sanitizeDiagnostic } from './agent-diagnostics';
 
 // ---------- IPC target resolution ----------
@@ -399,15 +399,26 @@ async function main() {
     const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
     const codexThreadId = process.env.CODEX_THREAD_ID;
     if (claudeSessionId) {
+        const socketPath = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+        const pid = process.env.CLAUDE_PID
+            ? Number(process.env.CLAUDE_PID)
+            : claudePidFromSocketPath(socketPath);
+        const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
         const sessionName = `claude:${claudeSessionId.slice(-6)}`;
+        mcpLog(
+            `Claude messaging context for ${sessionName}: ` +
+            `socket=${socketPath ? 'present' : 'missing'}, ` +
+            `token=${process.env.CLAUDE_CODE_MESSAGING_TOKEN ? 'present' : 'missing'}, ` +
+            `pid=${pid ?? 'unavailable'}, project=${cwd}`
+        );
         mcpLog(`Detected agent session ${sessionName}; registering with the workspace extension`);
         try {
             await ipcPost('/session/register', {
-                agent: 'claude', sessionId: claudeSessionId, cwd: process.cwd(),
-                label: `claude-${process.env.CLAUDE_PID || claudeSessionId.slice(-6)}`,
-                socketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
+                agent: 'claude', sessionId: claudeSessionId, cwd,
+                label: `claude-${pid || claudeSessionId.slice(-6)}`,
+                socketPath,
                 token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
-                pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : undefined,
+                pid,
             });
             mcpLog(`Registered agent session ${sessionName}`);
         } catch (error: any) {

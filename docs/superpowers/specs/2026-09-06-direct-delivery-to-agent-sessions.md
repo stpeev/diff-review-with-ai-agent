@@ -198,10 +198,13 @@ Protocol as reverse-engineered from the `[uds-messaging]` module in the bundled
   must match `^/tmp/cc-socks(-<uid>)?$`.
 - Accepted frames land in `onEnqueue` — the session's input queue.
 
-**This is a private, undocumented protocol and will break.** It is isolated
-behind one module and one setting (`diffReview.experimentalDirectDelivery`,
-default off in v1), and every failure falls through to F5. The exact frame has
-**not** yet been round-tripped; see Verification.
+**This is a private, undocumented protocol and may break.** It is isolated
+behind one module, and every failure falls through to F5. A verified Claude
+session uses it automatically. The exact frame has been round-tripped against
+Claude Code 2.1.267: an `auth` frame followed by a `user` frame reached a
+disposable idle session, started a turn, and produced the requested response.
+Claude returned no protocol acknowledgement, so the adapter can prove that the
+socket write completed but not that the turn ran; see Verification.
 
 ## F4 — Codex adapter: `codex queue`
 
@@ -338,10 +341,6 @@ try to defend it.
 
 ## Open decisions
 
-- **Frame `type` value for F3.** The handler dispatches on `type`, but which
-  literal corresponds to the user-message path is not yet pinned. Blocks F3.
-- **Whether F3 ships enabled.** Proposed: off by default in v1, promoted only
-  after the frame is round-tripped and survives one agent upgrade.
 - **Poke text.** A fixed instruction ("review comments are pending, call
   `listDiffComments`") versus including a short summary inline. Fixed text keeps
   the poke/pull split honest; a summary is friendlier when the agent is idle.
@@ -359,7 +358,7 @@ try to defend it.
 
 | # | Check | How |
 |---|---|---|
-| 1 | F3 frame round-trips | Send a candidate frame to a disposable `claude` session's socket; confirm it appears in that session's input queue. **Gates F3.** |
+| 1 | F3 frame round-trips | **Confirmed against Claude Code 2.1.267.** An authenticated `user` frame reached a disposable session and triggered the expected response. |
 | 2 | F3 rejects a bad token | Same, with a wrong `CLAUDE_CODE_MESSAGING_TOKEN`; expect a drop, not a crash. |
 | 3 | F4 delivers to a panel session | Queue to a Codex thread open in the VS Code panel; confirm the turn starts. (Confirmed already against a driven `app-server`; not yet against the panel itself.) |
 | 4 | F4 mid-turn | Queue while a turn is running; confirm it appends and the notification says so. |
@@ -395,6 +394,6 @@ should be unit-testable against a pure roster/binding module in the style of
 - `src/mcp-consumers.ts` — write the per-server tool timeout alongside the
   existing entry (`timeout` for `claude-json`, `tool_timeout_sec` for
   `codex-toml`).
-- `package.json` — the `diffReview_awaitReview` language model tool, the
-  `diffReview.experimentalDirectDelivery` setting, and a re-target command.
+- `package.json` — the `diffReview_awaitReview` language model tool and a
+  re-target command.
 - `test/agent-roster.test.js` — **new.** Covers checks 5–7 and 9.
