@@ -22,6 +22,7 @@ import {
     NoServerError, AmbiguousPortError,
 } from './ipc-discovery';
 import { codexThreadIdFromMeta } from './agent-roster';
+import { diagnosticEnvironment, sanitizeDiagnostic } from './agent-diagnostics';
 
 // ---------- IPC target resolution ----------
 
@@ -197,6 +198,22 @@ function mcpLog(message: string): void {
     process.stderr.write(`[${new Date().toISOString()}] [diff-review] ${message}\n`);
 }
 
+const STARTUP_DIAGNOSTIC_FILE = path.join(descriptorDir(os.tmpdir()), 'mcp-startup-diagnostics.jsonl');
+
+function writeStartupDiagnostic(event: string, details: Record<string, unknown>): void {
+    try {
+        fs.mkdirSync(path.dirname(STARTUP_DIAGNOSTIC_FILE), { recursive: true });
+        fs.appendFileSync(STARTUP_DIAGNOSTIC_FILE, JSON.stringify({
+            timestamp: new Date().toISOString(),
+            event,
+            ...details,
+        }) + '\n', { mode: 0o600 });
+        fs.chmodSync(STARTUP_DIAGNOSTIC_FILE, 0o600);
+    } catch (error: any) {
+        mcpLog(`Could not write startup diagnostics: ${error.message ?? error}`);
+    }
+}
+
 interface RegistrationOutcome { ok: boolean; error?: string; }
 const codexRegistrations = new Map<string, Promise<RegistrationOutcome>>();
 
@@ -360,6 +377,24 @@ server.tool(
 // ---------- Start ----------
 
 async function main() {
+    writeStartupDiagnostic('process-start', {
+        process: {
+            pid: process.pid,
+            ppid: process.ppid,
+            cwd: process.cwd(),
+            execPath: process.execPath,
+            argv: process.argv,
+            execArgv: process.execArgv,
+            platform: process.platform,
+            arch: process.arch,
+            nodeVersion: process.version,
+            title: process.title,
+            uid: process.getuid?.() ?? null,
+            gid: process.getgid?.() ?? null,
+        },
+        environmentKeys: Object.keys(process.env).sort(),
+        relevantEnvironment: diagnosticEnvironment(process.env),
+    });
     mcpLog(`Starting MCP server (pid ${process.pid}, cwd ${process.cwd()})`);
     const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
     const codexThreadId = process.env.CODEX_THREAD_ID;
@@ -384,6 +419,11 @@ async function main() {
         mcpLog('No startup session environment detected; Codex will register on its first tool call');
     }
     mcpLog('Connecting stdio transport');
+    server.server.oninitialized = () => writeStartupDiagnostic('mcp-initialized', {
+        process: { pid: process.pid, ppid: process.ppid, cwd: process.cwd() },
+        client: server.server.getClientVersion() ?? null,
+        capabilities: sanitizeDiagnostic(server.server.getClientCapabilities() ?? {}),
+    });
     const transport = new StdioServerTransport();
     await server.connect(transport);
     mcpLog('MCP server ready');
