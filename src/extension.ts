@@ -15,6 +15,8 @@ import { LM_TOOLS, prosePolicy } from './review-policy';
 import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
+import { AgentRoster, AgentSession, resolveBinding } from './agent-roster';
+import { deliverToSession } from './agent-deliver';
 import {
     Role, ThreadStatus, SerializedComment, SerializedThread, BranchState, ScopeFile,
     emptyBranch, emptyScopeFile, mergeScopeFiles,
@@ -978,6 +980,61 @@ let ipcServer: http.Server | undefined;
 let ipcPort: number = 0;
 let myWorkspaceRoots: string[] = [];
 let descriptorFilePath: string | undefined;
+const agentRoster = new AgentRoster();
+let reviewGeneration = 0;
+const reviewWaiters = new Set<(generation: number) => void>();
+
+function notifyReviewWaiters(): void {
+    reviewGeneration++;
+    for (const waiter of reviewWaiters) waiter(reviewGeneration);
+    reviewWaiters.clear();
+}
+
+function cwdInWorkspace(cwd: string): boolean {
+    const candidate = realpathOrSelf(cwd);
+    return myWorkspaceRoots.some(root => isAncestor(realpathOrSelf(root), candidate));
+}
+
+async function selectAgentSession(forcePicker = false): Promise<AgentSession | undefined> {
+    const sessions = agentRoster.list();
+    if (sessions.length === 0) return undefined;
+    const key = 'diffReview.boundSession';
+    const boundId = extensionContext.workspaceState.get<string>(key);
+    const automatic = !forcePicker && resolveBinding(sessions, boundId);
+    if (automatic) {
+        if (automatic.sessionId !== boundId) await extensionContext.workspaceState.update(key, automatic.sessionId);
+        return automatic;
+    }
+    const picked = await vscode.window.showQuickPick(sessions.map(session => ({
+        label: session.label, description: session.agent === 'codex' ? 'Codex' : 'Claude Code',
+        detail: session.cwd, session,
+    })), { title: 'Send Diff Review to Agent Session', placeHolder: 'Choose the exact running session' });
+    if (!picked) return undefined;
+    await extensionContext.workspaceState.update(key, picked.session.sessionId);
+    return picked.session;
+}
+
+async function deliverOrFallback(prompt: string, count: number): Promise<void> {
+    const sessions = agentRoster.list();
+    if (sessions.length > 0) {
+        const session = await selectAgentSession();
+        if (!session) return;
+        notifyReviewWaiters();
+        try {
+            const outcome = await deliverToSession(session);
+            vscode.window.showInformationMessage(`Diff Review sent to ${session.label}${outcome ? ` — ${outcome}` : ''}`);
+        } catch (error: any) {
+            log(`[Diff Review] Direct delivery to ${session.label} failed: ${error.message ?? error}`);
+            vscode.window.showWarningMessage(`Review queued for ${session.label}; direct delivery failed. It will arrive on the agent's next awaitReview poll.`);
+        }
+        return;
+    }
+    try { await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt }); }
+    catch {
+        await vscode.env.clipboard.writeText(prompt);
+        vscode.window.showInformationMessage(`Prompt with ${count} comment(s) copied to clipboard.`);
+    }
+}
 
 async function pingCandidate(port: number, timeoutMs = 800): Promise<boolean> {
     return new Promise(resolve => {
@@ -1044,6 +1101,31 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     log(`[Diff Review] Comments listed via IPC (${threads.length} thread(s))`);
                     res.writeHead(200);
                     res.end(JSON.stringify({ threads }));
+                } else if (method === 'GET' && url.pathname === '/review/await') {
+                    const since = Number(url.searchParams.get('since') ?? 0);
+                    if (reviewGeneration > since) { res.writeHead(200); res.end(JSON.stringify({ pending: true, generation: reviewGeneration })); return; }
+                    const timer = setTimeout(() => { reviewWaiters.delete(done); res.writeHead(200); res.end(JSON.stringify({ pending: false, generation: reviewGeneration })); }, 45000);
+                    const done = (generation: number) => { clearTimeout(timer); res.writeHead(200); res.end(JSON.stringify({ pending: true, generation })); };
+                    reviewWaiters.add(done);
+                } else if (method === 'POST' && url.pathname === '/session/register') {
+                    const data = JSON.parse(await readBody(req));
+                    if (!checkWorkspaceRoot(data.expectWorkspaceRoot) || typeof data.cwd !== 'string' || !cwdInWorkspace(data.cwd)) { respondMismatch(res); return; }
+                    if ((data.agent !== 'claude' && data.agent !== 'codex') || typeof data.sessionId !== 'string' || !data.sessionId) {
+                        res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid agent session registration' })); return;
+                    }
+                    if (data.agent === 'claude') {
+                        const pid = Number(data.pid);
+                        const expectedSocket = new RegExp(`^/tmp/cc-socks(?:-${process.getuid?.()})?/${pid}\\.sock$`);
+                        let verified = Number.isInteger(pid) && pid > 0 && expectedSocket.test(String(data.socketPath ?? ''));
+                        try {
+                            process.kill(pid, 0);
+                            verified = verified && fs.statSync(data.socketPath).uid === process.getuid?.();
+                        } catch { verified = false; }
+                        if (!verified) { res.writeHead(400); res.end(JSON.stringify({ error: 'Claude session identity could not be verified' })); return; }
+                    }
+                    const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.pid });
+                    log(`[Diff Review] Registered ${session.agent} session ${session.label}`);
+                    res.writeHead(200); res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
                     const body = await readBody(req);
                     const { threadId, text, expectWorkspaceRoot } = JSON.parse(body);
@@ -1572,12 +1654,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.sendThread', async (thread: vscode.CommentThread) => {
             const prompt = await buildPrompt([thread]);
-            try {
-                await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
-            } catch {
-                await vscode.env.clipboard.writeText(prompt);
-                vscode.window.showInformationMessage('Prompt copied to clipboard.');
-            }
+            await deliverOrFallback(prompt, 1);
         })
     );
 
@@ -1632,6 +1709,9 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Submit all open to Copilot ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.submitAll', () => submitAll())
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('diffReview.selectAgentSession', () => selectAgentSession(true))
     );
 
     // --- Resolve all ---
@@ -2526,14 +2606,7 @@ async function submitAll() {
         return;
     }
     const prompt = await buildPrompt(openThreads);
-    try {
-        await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
-    } catch {
-        await vscode.env.clipboard.writeText(prompt);
-        vscode.window.showInformationMessage(
-            `Prompt with ${openThreads.length} comment(s) copied to clipboard.`
-        );
-    }
+    await deliverOrFallback(prompt, openThreads.length);
 }
 
 // --------------- Git Diff Context ---------------

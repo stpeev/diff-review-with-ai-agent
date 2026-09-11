@@ -159,11 +159,11 @@ test('claude: absent mcpServers is missing, and the write creates it', () => {
     const parsed = JSON.parse(writeClaudeJson(text, LAUNCHER));
     assert.strictEqual(parsed.numStartups, 12, 'unrelated keys survive');
     assert.deepStrictEqual(parsed.mcpServers['diff-review'],
-        { type: 'stdio', command: 'node', args: [LAUNCHER] });
+        { type: 'stdio', command: 'node', args: [LAUNCHER], timeout: 60000 });
 });
 
 test('claude: a launcher entry is current', () => {
-    const text = JSON.stringify({ mcpServers: { 'diff-review': { command: 'node', args: [LAUNCHER] } } });
+    const text = JSON.stringify({ mcpServers: { 'diff-review': { command: 'node', args: [LAUNCHER], timeout: 60000 } } });
     assert.strictEqual(inspectClaudeJson(text, LAUNCHER).status, 'current');
 });
 

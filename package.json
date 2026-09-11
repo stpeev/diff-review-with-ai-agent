@@ -129,8 +129,13 @@
       },
       {
         "command": "diffReview.submitAll",
-        "title": "Diff Review: Submit All to Copilot",
+        "title": "Diff Review: Submit All to Agent",
         "icon": "$(send)"
+      },
+      {
+        "command": "diffReview.selectAgentSession",
+        "title": "Diff Review: Select Agent Session",
+        "icon": "$(account)"
       },
       {
         "command": "diffReview.resolveAll",
@@ -352,8 +357,27 @@
             "commentId"
           ]
         }
+      },
+      {
+        "name": "diffReview_awaitReview",
+        "displayName": "Await Diff Review",
+        "toolReferenceName": "awaitReview",
+        "icon": "$(watch)",
+        "modelDescription": "Wait up to 45 seconds for the user to send review comments to this agent session.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": { "type": "object", "properties": {} }
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Diff Review",
+      "properties": {
+        "diffReview.experimentalDirectDelivery": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable experimental private-protocol delivery to Claude Code sessions."
+        }
+      }
+    }
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

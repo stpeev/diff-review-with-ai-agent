@@ -71,8 +71,8 @@ export function samePath(a: string, b: string, home = os.homedir()): boolean {
 }
 
 /** The entry every writer produces. */
-function canonicalEntry(launcher: string) {
-    return { type: 'stdio', command: 'node', args: [launcher] };
+function canonicalEntry(launcher: string, timeout?: number) {
+    return { type: 'stdio', command: 'node', args: [launcher], ...(timeout ? { timeout } : {}) };
 }
 
 function renderCommand(command: unknown, args: unknown): string {
@@ -207,7 +207,10 @@ export function inspectCodexToml(text: string | null, launcher: string, home = o
     const block = lines.slice(span.start, span.end).join('\n');
     const command = parseTomlStringArray(tomlValue(block, 'command'))[0];
     const args = parseTomlStringArray(tomlValue(block, 'args'));
-    return classifyEntry({ command, args }, launcher, home);
+    const classified = classifyEntry({ command, args }, launcher, home);
+    return classified.status === 'current' && tomlValue(block, 'tool_timeout_sec') !== '60'
+        ? { status: 'stale', current: 'registered without the required 60s tool timeout', writable: true }
+        : classified;
 }
 
 /**
@@ -216,7 +219,7 @@ export function inspectCodexToml(text: string | null, launcher: string, home = o
  * add would give them back.
  */
 export function writeCodexToml(text: string | null, launcher: string): string {
-    const entry = [TOML_TABLE, 'command = "node"', `args = ["${launcher.replace(/"/g, '\\"')}"]`].join('\n');
+    const entry = [TOML_TABLE, 'command = "node"', `args = ["${launcher.replace(/"/g, '\\"')}"]`, 'tool_timeout_sec = 60'].join('\n');
     if (text === null || text.trim() === '') return entry + '\n';
 
     const lines = text.split('\n');
@@ -251,7 +254,10 @@ export function inspectClaudeJson(text: string | null, launcher: string, home = 
     }
     const entry = servers[SERVER_NAME];
     if (entry === undefined) return { status: 'missing', writable: true };
-    return classifyEntry(entry, launcher, home);
+    const classified = classifyEntry(entry, launcher, home);
+    return classified.status === 'current' && entry.timeout !== 60000
+        ? { status: 'stale', current: 'registered without the required 60000ms tool timeout', writable: true }
+        : classified;
 }
 
 /**
@@ -260,7 +266,7 @@ export function inspectClaudeJson(text: string | null, launcher: string, home = 
  */
 export function writeClaudeJson(text: string | null, launcher: string): string {
     const parsed = text === null || text.trim() === '' ? {} : JSON.parse(text);
-    parsed.mcpServers = { ...(parsed.mcpServers ?? {}), [SERVER_NAME]: canonicalEntry(launcher) };
+    parsed.mcpServers = { ...(parsed.mcpServers ?? {}), [SERVER_NAME]: canonicalEntry(launcher, 60000) };
     return JSON.stringify(parsed, null, 2) + '\n';
 }
 

@@ -123,7 +123,7 @@ function pingLegacy(port: number): Promise<boolean> {
 
 // ---------- IPC Client ----------
 
-function ipcGet(endpoint: string, port: number): Promise<any> {
+function ipcGet(endpoint: string, port: number, timeoutMs = 5000): Promise<any> {
     return new Promise((resolve, reject) => {
         const req = http.get(`http://127.0.0.1:${port}${endpoint}`, (res) => {
             const chunks: Buffer[] = [];
@@ -137,7 +137,7 @@ function ipcGet(endpoint: string, port: number): Promise<any> {
             });
         });
         req.on('error', reject);
-        req.setTimeout(5000, () => { req.destroy(); reject(new Error('IPC request timeout')); });
+        req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('IPC request timeout')); });
     });
 }
 
@@ -186,6 +186,7 @@ const server = new McpServer({
     name: 'diff-review',
     version: '0.1.0',
 });
+let lastReviewGeneration = 0;
 
 // Tool 1: List comments
 server.tool(
@@ -207,6 +208,24 @@ server.tool(
             return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
         } catch (e: any) {
             return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }] };
+        }
+    }
+);
+
+server.tool(
+    'awaitReview',
+    'Wait for the user to send review comments, then return an instruction to list and address them',
+    {},
+    async () => {
+        try {
+            const target = await resolveTarget();
+            const result = await ipcGet(`/review/await?since=${lastReviewGeneration}`, target.port, 50000);
+            lastReviewGeneration = result.generation ?? lastReviewGeneration;
+            return { content: [{ type: 'text' as const, text: result.pending
+                ? 'Review comments are pending. Call listDiffComments now and address every open thread.'
+                : 'No review arrived yet. Call awaitReview again when ready.' }] };
+        } catch (e: any) {
+            return { content: [{ type: 'text' as const, text: `Error waiting for review: ${e.message}` }] };
         }
     }
 );
@@ -286,6 +305,21 @@ server.tool(
 // ---------- Start ----------
 
 async function main() {
+    const agent = process.env.CLAUDE_CODE_SESSION_ID ? 'claude' : process.env.CODEX_THREAD_ID ? 'codex' : undefined;
+    const sessionId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CODEX_THREAD_ID;
+    if (agent && sessionId) {
+        try {
+            await ipcPost('/session/register', {
+                agent, sessionId, cwd: process.cwd(),
+                label: agent === 'claude' ? `claude-${process.env.CLAUDE_PID || sessionId.slice(-6)}` : `codex-${sessionId.slice(-6)}`,
+                socketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
+                token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
+                pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : undefined,
+            });
+        } catch (error: any) {
+            process.stderr.write(`[diff-review] Session registration failed: ${error.message}\n`);
+        }
+    }
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }

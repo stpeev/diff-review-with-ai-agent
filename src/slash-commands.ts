@@ -122,6 +122,12 @@ Call \`listDiffComments\`. If the tool is not available, stop and tell the
 user to run **\`Diff Review: Register MCP Server with a Coding Agent\`** from
 the command palette — this command is useless without it.
 
+After all currently open threads are handled, call \`awaitReview\`. If it
+reports that a review is pending, call \`listDiffComments\` again and repeat.
+If it reports nothing yet, call \`awaitReview\` again while the user is still
+reviewing. Each wait returns within 45 seconds so it stays below the configured
+60-second MCP tool timeout.
+
 ${sectionedPolicy({ tools: MCP_TOOLS, threadRef: 'listed' }, 2)}`,
 };
 

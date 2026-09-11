@@ -52,6 +52,8 @@ const targets = {
     'slash-commands': { ...shared, entryPoints: ['src/slash-commands.ts'], outfile: 'out/test/slash-commands.js', target: 'node18' },
     'review-policy': { ...shared, entryPoints: ['src/review-policy.ts'], outfile: 'out/test/review-policy.js', target: 'node18' },
     'git-scope': { ...shared, entryPoints: ['src/git-scope.ts'], outfile: 'out/test/git-scope.js', target: 'node18' },
+    'agent-roster': { ...shared, entryPoints: ['src/agent-roster.ts'], outfile: 'out/test/agent-roster.js', target: 'node18' },
+    'agent-deliver': { ...shared, entryPoints: ['src/agent-deliver.ts'], outfile: 'out/test/agent-deliver.js', target: 'node18' },
 };
 
 /**
@@ -68,7 +70,7 @@ const groups = {
     standalone: [
         'consumers', 'file-write', 'vscode-profiles', 'slash-commands',
         'ipc-discovery', 'scope-id', 'comment-store', 'path-util', 'git-scope',
-        'review-policy',
+        'review-policy', 'agent-roster', 'agent-deliver',
     ],
 };
 
