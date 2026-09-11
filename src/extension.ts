@@ -985,9 +985,15 @@ let reviewGeneration = 0;
 const reviewWaiters = new Set<(generation: number) => void>();
 
 function notifyReviewWaiters(): void {
+    const waiterCount = reviewWaiters.size;
     reviewGeneration++;
     for (const waiter of reviewWaiters) waiter(reviewGeneration);
     reviewWaiters.clear();
+    log(`[Diff Review] Review generation ${reviewGeneration} announced to ${waiterCount} waiting agent(s)`);
+}
+
+function sessionLogName(session: Pick<AgentSession, 'agent' | 'sessionId'>): string {
+    return `${session.agent}:${session.sessionId.slice(-6)}`;
 }
 
 function cwdInWorkspace(cwd: string): boolean {
@@ -1003,14 +1009,19 @@ async function selectAgentSession(forcePicker = false): Promise<AgentSession | u
     const automatic = !forcePicker && resolveBinding(sessions, boundId);
     if (automatic) {
         if (automatic.sessionId !== boundId) await extensionContext.workspaceState.update(key, automatic.sessionId);
+        log(`[Diff Review] Selected agent session ${sessionLogName(automatic)} (${automatic.sessionId === boundId ? 'remembered binding' : 'only available session'})`);
         return automatic;
     }
     const picked = await vscode.window.showQuickPick(sessions.map(session => ({
         label: session.label, description: session.agent === 'codex' ? 'Codex' : 'Claude Code',
         detail: session.cwd, session,
     })), { title: 'Send Diff Review to Agent Session', placeHolder: 'Choose the exact running session' });
-    if (!picked) return undefined;
+    if (!picked) {
+        log('[Diff Review] Agent session selection cancelled');
+        return undefined;
+    }
     await extensionContext.workspaceState.update(key, picked.session.sessionId);
+    log(`[Diff Review] Selected agent session ${sessionLogName(picked.session)} (manual selection)`);
     return picked.session;
 }
 
@@ -1021,17 +1032,24 @@ async function deliverOrFallback(prompt: string, count: number): Promise<void> {
         if (!session) return;
         notifyReviewWaiters();
         try {
+            log(`[Diff Review] Delivering ${count} review comment(s) to ${sessionLogName(session)}`);
             const outcome = await deliverToSession(session);
+            log(`[Diff Review] Direct delivery to ${sessionLogName(session)} succeeded`);
             vscode.window.showInformationMessage(`Diff Review sent to ${session.label}${outcome ? ` — ${outcome}` : ''}`);
         } catch (error: any) {
-            log(`[Diff Review] Direct delivery to ${session.label} failed: ${error.message ?? error}`);
+            log(`[Diff Review] Direct delivery to ${sessionLogName(session)} failed: ${error.message ?? error}; review remains queued for awaitReview`);
             vscode.window.showWarningMessage(`Review queued for ${session.label}; direct delivery failed. It will arrive on the agent's next awaitReview poll.`);
         }
         return;
     }
-    try { await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt }); }
+    log(`[Diff Review] No registered agent session; opening chat with ${count} review comment(s)`);
+    try {
+        await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
+        log('[Diff Review] Review prompt opened in chat');
+    }
     catch {
         await vscode.env.clipboard.writeText(prompt);
+        log('[Diff Review] Chat could not be opened; review prompt copied to clipboard');
         vscode.window.showInformationMessage(`Prompt with ${count} comment(s) copied to clipboard.`);
     }
 }
@@ -1103,14 +1121,25 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                     res.end(JSON.stringify({ threads }));
                 } else if (method === 'GET' && url.pathname === '/review/await') {
                     const since = Number(url.searchParams.get('since') ?? 0);
-                    if (reviewGeneration > since) { res.writeHead(200); res.end(JSON.stringify({ pending: true, generation: reviewGeneration })); return; }
+                    if (reviewGeneration > since) {
+                        log(`[Diff Review] awaitReview found pending generation ${reviewGeneration}`);
+                        res.writeHead(200); res.end(JSON.stringify({ pending: true, generation: reviewGeneration })); return;
+                    }
                     const timer = setTimeout(() => { reviewWaiters.delete(done); res.writeHead(200); res.end(JSON.stringify({ pending: false, generation: reviewGeneration })); }, 45000);
-                    const done = (generation: number) => { clearTimeout(timer); res.writeHead(200); res.end(JSON.stringify({ pending: true, generation })); };
+                    const done = (generation: number) => {
+                        clearTimeout(timer);
+                        log(`[Diff Review] awaitReview released for generation ${generation}`);
+                        res.writeHead(200); res.end(JSON.stringify({ pending: true, generation }));
+                    };
                     reviewWaiters.add(done);
                 } else if (method === 'POST' && url.pathname === '/session/register') {
                     const data = JSON.parse(await readBody(req));
-                    if (!checkWorkspaceRoot(data.expectWorkspaceRoot) || typeof data.cwd !== 'string' || !cwdInWorkspace(data.cwd)) { respondMismatch(res); return; }
+                    if (!checkWorkspaceRoot(data.expectWorkspaceRoot) || typeof data.cwd !== 'string' || !cwdInWorkspace(data.cwd)) {
+                        log('[Diff Review] Rejected agent session registration: workspace mismatch');
+                        respondMismatch(res); return;
+                    }
                     if ((data.agent !== 'claude' && data.agent !== 'codex') || typeof data.sessionId !== 'string' || !data.sessionId) {
+                        log('[Diff Review] Rejected malformed agent session registration');
                         res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid agent session registration' })); return;
                     }
                     if (data.agent === 'claude') {
@@ -1121,10 +1150,13 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                             process.kill(pid, 0);
                             verified = verified && fs.statSync(data.socketPath).uid === process.getuid?.();
                         } catch { verified = false; }
-                        if (!verified) { res.writeHead(400); res.end(JSON.stringify({ error: 'Claude session identity could not be verified' })); return; }
+                        if (!verified) {
+                            log(`[Diff Review] Rejected Claude session ${String(data.sessionId).slice(-6)}: identity verification failed`);
+                            res.writeHead(400); res.end(JSON.stringify({ error: 'Claude session identity could not be verified' })); return;
+                        }
                     }
                     const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.pid });
-                    log(`[Diff Review] Registered ${session.agent} session ${session.label}`);
+                    log(`[Diff Review] Registered agent session ${sessionLogName(session)} (${agentRoster.list().length} active session(s))`);
                     res.writeHead(200); res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
                     const body = await readBody(req);
