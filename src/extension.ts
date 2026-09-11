@@ -1013,7 +1013,8 @@ async function selectAgentSession(forcePicker = false): Promise<AgentSession | u
         return automatic;
     }
     const picked = await vscode.window.showQuickPick(sessions.map(session => ({
-        label: session.label, description: session.agent === 'codex' ? 'Codex' : 'Claude Code',
+        label: session.label,
+        description: `${session.agent === 'codex' ? 'Codex' : 'Claude Code'} · ${session.sessionId.slice(-6)}`,
         detail: session.cwd, session,
     })), { title: 'Send Diff Review to Agent Session', placeHolder: 'Choose the exact running session' });
     if (!picked) {
@@ -1163,7 +1164,7 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         }
                     }
                     const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.agent === 'claude' ? claudePidFromSocketPath(data.socketPath) : data.pid });
-                    log(`[Diff Review] Registered agent session ${sessionLogName(session)} (${agentRoster.list().length} active session(s))`);
+                    log(`[Diff Review] Registered agent session ${session.label} [${sessionLogName(session)}] (${agentRoster.list().length} active session(s))`);
                     res.writeHead(200); res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
                     const body = await readBody(req);

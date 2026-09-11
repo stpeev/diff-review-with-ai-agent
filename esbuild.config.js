@@ -55,6 +55,7 @@ const targets = {
     'agent-roster': { ...shared, entryPoints: ['src/agent-roster.ts'], outfile: 'out/test/agent-roster.js', target: 'node18' },
     'agent-deliver': { ...shared, entryPoints: ['src/agent-deliver.ts'], outfile: 'out/test/agent-deliver.js', target: 'node18' },
     'agent-diagnostics': { ...shared, entryPoints: ['src/agent-diagnostics.ts'], outfile: 'out/test/agent-diagnostics.js', target: 'node18' },
+    'agent-label': { ...shared, entryPoints: ['src/agent-label.ts'], outfile: 'out/test/agent-label.js', target: 'node18' },
 };
 
 /**
@@ -71,7 +72,7 @@ const groups = {
     standalone: [
         'consumers', 'file-write', 'vscode-profiles', 'slash-commands',
         'ipc-discovery', 'scope-id', 'comment-store', 'path-util', 'git-scope',
-        'review-policy', 'agent-roster', 'agent-deliver', 'agent-diagnostics',
+        'review-policy', 'agent-roster', 'agent-deliver', 'agent-diagnostics', 'agent-label',
     ],
 };
 

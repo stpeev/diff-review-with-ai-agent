@@ -18,8 +18,20 @@ interface FetchDataOptions {
     skipCache?: boolean;
 }
 
-const cache = new Map<string, CacheEntry<any>>();
+const cache = new Map<string, CacheEntry<unknown>>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function cacheResult<T>(endpoint: string, data: T): void {
+    const now = Date.now();
+
+    // Drop entries that are already stale, so the cache cannot grow without bound
+    // for callers that hit many distinct endpoints.
+    for (const [key, entry] of cache) {
+        if (entry.expiry <= now) cache.delete(key);
+    }
+
+    cache.set(endpoint, { data, expiry: now + CACHE_TTL });
+}
 
 export async function fetchData<T>(endpoint: string, options?: FetchDataOptions): Promise<T> {
     // Check cache first
@@ -27,7 +39,7 @@ export async function fetchData<T>(endpoint: string, options?: FetchDataOptions)
         const cached = cache.get(endpoint);
         if (cached && cached.expiry > Date.now()) {
             console.log(`[Cache] HIT: ${endpoint}`);
-            return cached.data;
+            return cached.data as T;
         }
     }
 
@@ -40,11 +52,7 @@ export async function fetchData<T>(endpoint: string, options?: FetchDataOptions)
 
     const json: ApiResponse<T> = await response.json();
 
-    // Cache the result
-    cache.set(endpoint, {
-        data: json.data,
-        expiry: Date.now() + CACHE_TTL,
-    });
+    cacheResult(endpoint, json.data);
 
     return json.data;
 }

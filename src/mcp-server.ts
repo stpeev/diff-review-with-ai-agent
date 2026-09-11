@@ -23,6 +23,7 @@ import {
 } from './ipc-discovery';
 import { claudePidFromSocketPath, codexThreadIdFromMeta } from './agent-roster';
 import { diagnosticEnvironment, sanitizeDiagnostic } from './agent-diagnostics';
+import { claudeSessionLabel, codexSessionLabel } from './agent-label';
 
 // ---------- IPC target resolution ----------
 
@@ -222,6 +223,7 @@ function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
     if (existing) return existing;
 
     const sessionName = `codex:${sessionId.slice(-6)}`;
+    const label = codexSessionLabel(sessionId) ?? `Codex ${sessionId.slice(-6)}`;
     const registration = (async () => {
         mcpLog(`Registering agent session ${sessionName} with the workspace extension`);
         try {
@@ -229,7 +231,7 @@ function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
                 agent: 'codex',
                 sessionId,
                 cwd: process.cwd(),
-                label: `codex-${sessionId.slice(-6)}`,
+                label,
             });
             mcpLog(`Registered agent session ${sessionName}`);
             return { ok: true };
@@ -405,6 +407,7 @@ async function main() {
             : claudePidFromSocketPath(socketPath);
         const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
         const sessionName = `claude:${claudeSessionId.slice(-6)}`;
+        const label = claudeSessionLabel(pid, claudeSessionId) ?? `Claude ${claudeSessionId.slice(-6)}`;
         mcpLog(
             `Claude messaging context for ${sessionName}: ` +
             `socket=${socketPath ? 'present' : 'missing'}, ` +
@@ -415,7 +418,7 @@ async function main() {
         try {
             await ipcPost('/session/register', {
                 agent: 'claude', sessionId: claudeSessionId, cwd,
-                label: `claude-${pid || claudeSessionId.slice(-6)}`,
+                label,
                 socketPath,
                 token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
                 pid,
