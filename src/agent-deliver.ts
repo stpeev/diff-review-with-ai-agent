@@ -4,8 +4,6 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { AgentSession } from './agent-roster';
 
-export const POKE_TEXT = 'Diff Review comments are pending. Call listDiffComments, address every open thread, reply with what changed, and resolve each completed thread.';
-
 function executable(file: string): boolean { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } }
 
 export function resolveCodexBinary(envPath = process.env.PATH ?? '', home = os.homedir()): string | undefined {
@@ -32,7 +30,7 @@ export function resolveCodexBinary(envPath = process.env.PATH ?? '', home = os.h
     return undefined;
 }
 
-export function deliverToSession(session: AgentSession, message = POKE_TEXT): Promise<string> {
+export function deliverToSession(session: AgentSession, message: string): Promise<string> {
     if (session.agent !== 'codex') return Promise.reject(new Error('Claude direct delivery is experimental and unavailable'));
     const binary = resolveCodexBinary();
     if (!binary) return Promise.reject(new Error('Codex executable not found'));

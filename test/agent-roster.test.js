@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { AgentRoster, resolveBinding } = require('../out/test/agent-roster.js');
+const { AgentRoster, resolveBinding, codexThreadIdFromMeta } = require('../out/test/agent-roster.js');
 const session = (id, recency) => ({ agent: 'codex', sessionId: id, label: id, cwd: '/work', recency });
 
 test('registration is idempotent and preserves registeredAt', () => {
@@ -23,4 +23,26 @@ test('binding resolves explicitly, silently for one, and not for many', () => {
     assert.equal(resolveBinding([one], undefined), one);
     assert.equal(resolveBinding([one, two], 'one'), one);
     assert.equal(resolveBinding([one, two], 'gone'), undefined);
+});
+
+test('Codex thread ID is read from the direct tool-call metadata field', () => {
+    assert.equal(codexThreadIdFromMeta({ threadId: 'thread-direct' }), 'thread-direct');
+});
+
+test('Codex thread ID falls back to nested turn metadata', () => {
+    assert.equal(codexThreadIdFromMeta({
+        'x-codex-turn-metadata': { thread_id: 'thread-nested', session_id: 'session-nested' },
+    }), 'thread-nested');
+    assert.equal(codexThreadIdFromMeta({
+        'x-codex-turn-metadata': { session_id: 'session-nested' },
+    }), 'session-nested');
+});
+
+test('direct Codex thread ID wins and malformed metadata is ignored', () => {
+    assert.equal(codexThreadIdFromMeta({
+        threadId: 'thread-direct',
+        'x-codex-turn-metadata': { thread_id: 'thread-nested' },
+    }), 'thread-direct');
+    assert.equal(codexThreadIdFromMeta({ threadId: '', 'x-codex-turn-metadata': 'bad' }), undefined);
+    assert.equal(codexThreadIdFromMeta(undefined), undefined);
 });

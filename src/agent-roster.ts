@@ -36,3 +36,15 @@ export function resolveBinding(sessions: AgentSession[], boundId: string | undef
     const bound = boundId ? sessions.find(s => s.sessionId === boundId) : undefined;
     return bound ?? (sessions.length === 1 ? sessions[0] : undefined);
 }
+
+/** Extract the owning Codex thread from metadata attached to an MCP tool call. */
+export function codexThreadIdFromMeta(meta: Record<string, unknown> | undefined): string | undefined {
+    const direct = meta?.threadId;
+    if (typeof direct === 'string' && direct.length > 0) return direct;
+
+    const turn = meta?.['x-codex-turn-metadata'];
+    if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return undefined;
+    const fields = turn as Record<string, unknown>;
+    const nested = fields.thread_id ?? fields.session_id;
+    return typeof nested === 'string' && nested.length > 0 ? nested : undefined;
+}

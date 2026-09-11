@@ -21,6 +21,7 @@ import {
     Descriptor, descriptorDir, resolvePort, ResolveResult,
     NoServerError, AmbiguousPortError,
 } from './ipc-discovery';
+import { codexThreadIdFromMeta } from './agent-roster';
 
 // ---------- IPC target resolution ----------
 
@@ -188,6 +189,60 @@ const server = new McpServer({
 });
 let lastReviewGeneration = 0;
 
+/**
+ * MCP uses stdout for JSON-RPC, so diagnostics must stay on stderr. Coding
+ * agents normally capture this stream in their MCP/server logs.
+ */
+function mcpLog(message: string): void {
+    process.stderr.write(`[${new Date().toISOString()}] [diff-review] ${message}\n`);
+}
+
+interface RegistrationOutcome { ok: boolean; error?: string; }
+const codexRegistrations = new Map<string, Promise<RegistrationOutcome>>();
+
+function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
+    const existing = codexRegistrations.get(sessionId);
+    if (existing) return existing;
+
+    const sessionName = `codex:${sessionId.slice(-6)}`;
+    const registration = (async () => {
+        mcpLog(`Registering agent session ${sessionName} with the workspace extension`);
+        try {
+            await ipcPost('/session/register', {
+                agent: 'codex',
+                sessionId,
+                cwd: process.cwd(),
+                label: `codex-${sessionId.slice(-6)}`,
+            });
+            mcpLog(`Registered agent session ${sessionName}`);
+            return { ok: true };
+        } catch (error: any) {
+            codexRegistrations.delete(sessionId);
+            mcpLog(`Session registration failed for ${sessionName}: ${error.message ?? error}`);
+            return { ok: false, error: error.message ?? String(error) };
+        }
+    })();
+    codexRegistrations.set(sessionId, registration);
+    return registration;
+}
+
+server.tool(
+    'registerAgentSession',
+    'Register this Codex conversation as a target for direct Diff Review delivery',
+    {},
+    async (_args, extra) => {
+        const sessionId = codexThreadIdFromMeta(extra._meta);
+        if (!sessionId) {
+            return { content: [{ type: 'text' as const, text:
+                'Could not register this agent session: the MCP tool call did not include a Codex thread ID.' }] };
+        }
+        const outcome = await registerCodexSession(sessionId);
+        return { content: [{ type: 'text' as const, text: outcome.ok
+            ? `Registered Codex session ${sessionId.slice(-6)} for direct Diff Review delivery.`
+            : `Could not register this Codex session: ${outcome.error}` }] };
+    }
+);
+
 // Tool 1: List comments
 server.tool(
     'listDiffComments',
@@ -305,23 +360,36 @@ server.tool(
 // ---------- Start ----------
 
 async function main() {
-    const agent = process.env.CLAUDE_CODE_SESSION_ID ? 'claude' : process.env.CODEX_THREAD_ID ? 'codex' : undefined;
-    const sessionId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CODEX_THREAD_ID;
-    if (agent && sessionId) {
+    mcpLog(`Starting MCP server (pid ${process.pid}, cwd ${process.cwd()})`);
+    const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+    const codexThreadId = process.env.CODEX_THREAD_ID;
+    if (claudeSessionId) {
+        const sessionName = `claude:${claudeSessionId.slice(-6)}`;
+        mcpLog(`Detected agent session ${sessionName}; registering with the workspace extension`);
         try {
             await ipcPost('/session/register', {
-                agent, sessionId, cwd: process.cwd(),
-                label: agent === 'claude' ? `claude-${process.env.CLAUDE_PID || sessionId.slice(-6)}` : `codex-${sessionId.slice(-6)}`,
+                agent: 'claude', sessionId: claudeSessionId, cwd: process.cwd(),
+                label: `claude-${process.env.CLAUDE_PID || claudeSessionId.slice(-6)}`,
                 socketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
                 token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
                 pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : undefined,
             });
+            mcpLog(`Registered agent session ${sessionName}`);
         } catch (error: any) {
-            process.stderr.write(`[diff-review] Session registration failed: ${error.message}\n`);
+            mcpLog(`Session registration failed for ${sessionName}: ${error.message ?? error}`);
         }
+    } else if (codexThreadId) {
+        await registerCodexSession(codexThreadId);
+    } else {
+        mcpLog('No startup session environment detected; Codex will register on its first tool call');
     }
+    mcpLog('Connecting stdio transport');
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    mcpLog('MCP server ready');
 }
 
-main().catch(console.error);
+main().catch((error: any) => {
+    mcpLog(`Fatal startup error: ${error?.stack ?? error?.message ?? error}`);
+    process.exitCode = 1;
+});

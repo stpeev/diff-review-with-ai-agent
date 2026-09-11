@@ -11,7 +11,7 @@ import {
     discoverSlashCommands, renderClipboard, install, INVOCATION,
 } from './slash-commands';
 import { isAncestor, resolveWithinRoot } from './path-util';
-import { LM_TOOLS, prosePolicy } from './review-policy';
+import { LM_TOOLS, MCP_TOOLS, PolicyTools, prosePolicy } from './review-policy';
 import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
@@ -1025,23 +1025,26 @@ async function selectAgentSession(forcePicker = false): Promise<AgentSession | u
     return picked.session;
 }
 
-async function deliverOrFallback(prompt: string, count: number): Promise<void> {
+async function deliverOrFallback(targetThreads: vscode.CommentThread[]): Promise<void> {
+    const count = targetThreads.length;
     const sessions = agentRoster.list();
     if (sessions.length > 0) {
         const session = await selectAgentSession();
         if (!session) return;
-        notifyReviewWaiters();
         try {
+            const prompt = await buildPrompt(targetThreads, MCP_TOOLS);
             log(`[Diff Review] Delivering ${count} review comment(s) to ${sessionLogName(session)}`);
-            const outcome = await deliverToSession(session);
+            const outcome = await deliverToSession(session, prompt);
             log(`[Diff Review] Direct delivery to ${sessionLogName(session)} succeeded`);
             vscode.window.showInformationMessage(`Diff Review sent to ${session.label}${outcome ? ` — ${outcome}` : ''}`);
         } catch (error: any) {
+            notifyReviewWaiters();
             log(`[Diff Review] Direct delivery to ${sessionLogName(session)} failed: ${error.message ?? error}; review remains queued for awaitReview`);
             vscode.window.showWarningMessage(`Review queued for ${session.label}; direct delivery failed. It will arrive on the agent's next awaitReview poll.`);
         }
         return;
     }
+    const prompt = await buildPrompt(targetThreads, LM_TOOLS);
     log(`[Diff Review] No registered agent session; opening chat with ${count} review comment(s)`);
     try {
         await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
@@ -1682,11 +1685,10 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // --- Send single thread to Copilot ---
+    // --- Send single thread to agent ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.sendThread', async (thread: vscode.CommentThread) => {
-            const prompt = await buildPrompt([thread]);
-            await deliverOrFallback(prompt, 1);
+            await deliverOrFallback([thread]);
         })
     );
 
@@ -1738,7 +1740,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('diffReview.showPanel', () => showCommentPanel())
     );
 
-    // --- Submit all open to Copilot ---
+    // --- Submit all open to agent ---
     context.subscriptions.push(
         vscode.commands.registerCommand('diffReview.submitAll', () => submitAll())
     );
@@ -2245,7 +2247,7 @@ async function showCommentPanel() {
 
         // Global actions (always shown)
         items.push(
-            { label: '$(send) Submit All Open to Copilot', description: `${openCount} open`, action: 'submitAll' },
+            { label: '$(send) Submit All Open to Agent', description: `${openCount} open`, action: 'submitAll' },
             { label: '$(clippy) Copy All Open to Clipboard', description: `${openCount} open`, action: 'copyAll' },
             { label: '$(check-all) Resolve All', description: `${openCount} open`, action: 'resolveAll' },
             { label: '$(trash) Delete All Resolved', description: `${resolvedCount} resolved`, action: 'deleteResolved' },
@@ -2408,7 +2410,7 @@ async function showCommentActions(threadId: number) {
 
     const items: ActionItem[] = [
         { label: '$(eye) Go to Comment', description: `${rel}:${line}`, action: 'goto' },
-        { label: '$(send) Send to Copilot', description: 'Submit this comment as a prompt', action: 'send' },
+        { label: '$(send) Send to Agent', description: 'Submit this comment as a prompt', action: 'send' },
         { label: '$(clippy) Copy to Clipboard', description: 'Copy this comment as a prompt', action: 'copy' },
         { label: resolved ? '$(debug-restart) Reopen' : '$(check) Resolve', action: resolved ? 'unresolve' : 'resolve' },
         { label: '$(trash) Delete', action: 'delete' },
@@ -2637,8 +2639,7 @@ async function submitAll() {
         vscode.window.showInformationMessage('No open review comments to submit.');
         return;
     }
-    const prompt = await buildPrompt(openThreads);
-    await deliverOrFallback(prompt, openThreads.length);
+    await deliverOrFallback(openThreads);
 }
 
 // --------------- Git Diff Context ---------------
@@ -2730,7 +2731,7 @@ function findRelevantHunk(hunks: DiffHunk[], targetLine: number): string | undef
 
 // --------------- Prompt Builder ---------------
 
-async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<string> {
+async function buildPrompt(targetThreads: vscode.CommentThread[], tools: PolicyTools = LM_TOOLS): Promise<string> {
     const byFile = new Map<string, vscode.CommentThread[]>();
     for (const thread of targetThreads) {
         const key = thread.uri.toString();
@@ -2739,9 +2740,12 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     }
 
     const parts: string[] = [];
-    parts.push(
-        'Inspect the following review comments to the code. Each comment includes ' +
-        'the file, line number, surrounding code context, the git diff (if available), and the comment text itself.\n'
+    parts.push(targetThreads.length === 1
+        ? 'Address only the following review comment. Do not list or act on other open review threads. ' +
+          'The comment includes the file, line number, surrounding code context, the git diff (if available), ' +
+          'and the comment text itself.\n'
+        : 'Inspect the following review comments to the code. Each comment includes ' +
+          'the file, line number, surrounding code context, the git diff (if available), and the comment text itself.\n'
     );
 
     for (const [uriStr, fileThreads] of byFile) {
@@ -2818,7 +2822,7 @@ async function buildPrompt(targetThreads: vscode.CommentThread[]): Promise<strin
     // The same policy the installed `/address-diff-review` command carries, so
     // an agent reached through chat and one reached through a slash command are
     // told to act on a comment identically. See src/review-policy.ts.
-    parts.push(prosePolicy({ tools: LM_TOOLS, threadRef: 'inline' }));
+    parts.push(prosePolicy({ tools, threadRef: 'inline' }));
     return parts.join('\n');
 }
 
