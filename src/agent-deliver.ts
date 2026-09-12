@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
 import { execFile } from 'child_process';
-import { AgentSession } from './agent-roster';
+import { AgentSession } from './agent-registry';
 
 function executable(file: string): boolean { try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; } }
 

@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] Instead of multiple install XXX commands - have just one 'setup diff-review' that does all installations: mcp-server, commands, what else..?
 - [ ] Install prettier, eslint and other goodies to the project
 - [ ] Add tests for the existing functionality (`npm test` runs node:test over `test/`; `mcp-consumers`, `ipc-discovery`, `scope-id`, and `comment-store` are covered — `extension.ts`'s glue is not, see below)
 - [ ] Add a basic AGENTS.md file
@@ -12,5 +13,5 @@
 
 - [x] Add a command to print out accurate current MCP server info (`Diff Review: Show MCP Server Info`)
 - [x] Add a command to auto discover and add the MCP server (`Diff Review: Register MCP Server with a Coding Agent`)
-- [x] Add a command to install `/perform-diff-review` and `/address-diff-review` as agent slash commands (`Diff Review: Install the Diff Review Agent Commands`) — see `docs/superpowers/specs/2026-09-05-agent-slash-command-design.md`
+- [x] Add a command to install `/perform-diff-review`, `/address-diff-review`, `/register-for-diff-review-send`, and `/unregister-for-diff-review-send` as agent slash commands (`Diff Review: Install the Diff Review Agent Commands`) — see `docs/superpowers/specs/2026-09-05-agent-slash-command-design.md`
 - [x] Move comment storage off `workspaceState` into `<globalStorageUri>/scopes/<scopeId>/comments.json` — stable across version upgrades (unlike the old versioned-install-folder concern), works without git, and survives two windows on the same folder (F1-F5 of the storage durability spec: scoped IPC ports, never-latch-`_default` git detection, the scope/storage move itself, content-based anchoring with a "Needs re-attaching" drift UI, and a reliable debounced write queue)

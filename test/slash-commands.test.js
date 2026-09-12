@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { renderBody, MARKER, INVOCATION } = require('../out/test/slash-commands');
 
-test('INVOCATION: the two commands', () => {
+test('INVOCATION: all four commands', () => {
     assert.strictEqual(INVOCATION.perform, '/perform-diff-review');
     assert.strictEqual(INVOCATION.address, '/address-diff-review');
+    assert.strictEqual(INVOCATION.register, '/register-for-diff-review-send');
+    assert.strictEqual(INVOCATION.unregister, '/unregister-for-diff-review-send');
 });
 
 test('renderBody: claude-md carries description and allowed-tools frontmatter', () => {
@@ -37,11 +39,13 @@ test('renderBody: every wrapper carries the marker for its command', () => {
     for (const kind of ['claude-md', 'codex-md', 'gemini-toml', 'vscode-prompt']) {
         assert.ok(renderBody(kind, 'perform').includes(MARKER.perform), `${kind} missing perform marker`);
         assert.ok(renderBody(kind, 'address').includes(MARKER.address), `${kind} missing address marker`);
+        assert.ok(renderBody(kind, 'register').includes(MARKER.register), `${kind} missing register marker`);
+        assert.ok(renderBody(kind, 'unregister').includes(MARKER.unregister), `${kind} missing unregister marker`);
     }
 });
 
-test('renderBody: the perform and address markers differ', () => {
-    assert.notStrictEqual(MARKER.perform, MARKER.address);
+test('renderBody: command markers are distinct', () => {
+    assert.strictEqual(new Set(Object.values(MARKER)).size, 4);
 });
 
 function bodyAfterMarker(rendered, marker, kind) {
@@ -59,7 +63,7 @@ function bodyAfterMarker(rendered, marker, kind) {
 }
 
 test('renderBody: the instructional Markdown is identical across all four wrappers', () => {
-    for (const command of ['perform', 'address']) {
+    for (const command of ['perform', 'address', 'register', 'unregister']) {
         const claude = bodyAfterMarker(renderBody('claude-md', command), MARKER[command], 'claude-md');
         const codex = bodyAfterMarker(renderBody('codex-md', command), MARKER[command], 'codex-md');
         const vscode = bodyAfterMarker(renderBody('vscode-prompt', command), MARKER[command], 'vscode-prompt');
@@ -79,6 +83,21 @@ test('renderBody: perform instructs never to edit code or commit', () => {
 test('renderBody: address instructs never to commit', () => {
     const body = renderBody('claude-md', 'address');
     assert.match(body, /[Nn]ever commit/);
+});
+
+test('renderBody: register supplies a meaningful label and does nothing else', () => {
+    const body = renderBody('claude-md', 'register');
+    assert.match(body, /registerAgentSession/);
+    assert.match(body, /passing\s+that name as its `label`/);
+    assert.match(body, /Do not inspect files/);
+    assert.match(body, /allowed-tools: mcp__diff-review__registerAgentSession/);
+});
+
+test('renderBody: unregister invokes only the matching MCP tool', () => {
+    const body = renderBody('claude-md', 'unregister');
+    assert.match(body, /unregisterAgentSession/);
+    assert.match(body, /Do not inspect/);
+    assert.match(body, /allowed-tools: mcp__diff-review__unregisterAgentSession/);
 });
 
 test('renderBody: gemini-toml escapes a literal """ in the body', () => {
@@ -113,8 +132,8 @@ test('discoverSlashCommands: Claude Code row appears once ~/.claude/commands exi
     const claude = targets.find(t => t.id === 'claude');
     assert.ok(claude, 'expected a claude row');
     assert.strictEqual(claude.kind, 'claude-md');
-    assert.strictEqual(claude.files.length, 2);
-    assert.deepStrictEqual(claude.files.map(f => f.command).sort(), ['address', 'perform']);
+    assert.strictEqual(claude.files.length, 4);
+    assert.deepStrictEqual(claude.files.map(f => f.command).sort(), ['address', 'perform', 'register', 'unregister']);
     assert.ok(claude.files.every(f => f.status === 'missing' && f.writable === true));
     assert.strictEqual(claude.status, 'missing');
 });
@@ -213,34 +232,38 @@ test('discoverSlashCommands: a stale file without our marker is not writable', (
     assert.match(perform.reason, /not written by Diff Review/);
 });
 
-test('discoverSlashCommands: row status is the worse of its two files (missing wins)', () => {
+test('discoverSlashCommands: row status is the worse of its files (missing wins)', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), require('../out/test/slash-commands').renderBody('claude-md', 'perform'));
-    // address-diff-review.md left missing.
+    // The other three command files are left missing.
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     assert.strictEqual(claude.status, 'missing');
 });
 
-test('discoverSlashCommands: row status is stale when one file is stale and the other current', () => {
+test('discoverSlashCommands: row status is stale when one file is stale and the others current', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
     const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     fs.writeFileSync(path.join(dir, 'address-diff-review.md'), `${sc.MARKER.address}\nold\n`);
+    fs.writeFileSync(path.join(dir, 'register-for-diff-review-send.md'), sc.renderBody('claude-md', 'register'));
+    fs.writeFileSync(path.join(dir, 'unregister-for-diff-review-send.md'), sc.renderBody('claude-md', 'unregister'));
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     assert.strictEqual(claude.status, 'stale');
 });
 
-test('discoverSlashCommands: row status is current only when both files are', () => {
+test('discoverSlashCommands: row status is current only when all files are', () => {
     const home = tmpHome();
     const dir = path.join(home, '.claude', 'commands');
     fs.mkdirSync(dir, { recursive: true });
     const sc = require('../out/test/slash-commands');
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     fs.writeFileSync(path.join(dir, 'address-diff-review.md'), sc.renderBody('claude-md', 'address'));
+    fs.writeFileSync(path.join(dir, 'register-for-diff-review-send.md'), sc.renderBody('claude-md', 'register'));
+    fs.writeFileSync(path.join(dir, 'unregister-for-diff-review-send.md'), sc.renderBody('claude-md', 'unregister'));
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     assert.strictEqual(claude.status, 'current');
 });
@@ -251,7 +274,7 @@ test('discoverSlashCommands: row writable is true if at least one file is writab
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), 'hand-written\n');
     const claude = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
-    assert.strictEqual(claude.writable, true); // address-diff-review.md is still missing => writable
+    assert.strictEqual(claude.writable, true); // The other command files are missing => writable.
 });
 
 test('discoverSlashCommands: VS Code family row appears when the app root exists', () => {
@@ -327,7 +350,7 @@ test('install: writes missing files and returns one result per file written', ()
     fs.mkdirSync(dir, { recursive: true });
     const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     const outcome = install(target);
-    assert.strictEqual(outcome.written.length, 2);
+    assert.strictEqual(outcome.written.length, 4);
     assert.strictEqual(outcome.errors.length, 0);
     assert.strictEqual(
         fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'),
@@ -343,8 +366,8 @@ test('install: skips a file that is already current', () => {
     fs.writeFileSync(path.join(dir, 'perform-diff-review.md'), sc.renderBody('claude-md', 'perform'));
     const target = discoverSlashCommands({ home, platform: 'linux' }).find(t => t.id === 'claude');
     const outcome = install(target);
-    assert.strictEqual(outcome.written.length, 1); // only address-diff-review.md
-    assert.strictEqual(outcome.written[0].command, 'address');
+    assert.strictEqual(outcome.written.length, 3); // address, register, and unregister are missing
+    assert.deepStrictEqual(outcome.written.map(w => w.command), ['address', 'register', 'unregister']);
 });
 
 test('install: backs up a stale-with-marker file before overwriting it', () => {
@@ -383,8 +406,8 @@ test('install: a write failure on one file is reported without blocking the othe
     const outcome = install(target);
     assert.strictEqual(outcome.errors.length, 1);
     assert.strictEqual(outcome.errors[0].command, 'perform');
-    assert.strictEqual(outcome.written.length, 1);
-    assert.strictEqual(outcome.written[0].command, 'address');
+    assert.strictEqual(outcome.written.length, 3);
+    assert.deepStrictEqual(outcome.written.map(w => w.command), ['address', 'register', 'unregister']);
 });
 
 test('install: creates the parent directory when it does not exist yet', () => {
@@ -400,11 +423,13 @@ test('install: creates the parent directory when it does not exist yet', () => {
         files: [
             { command: 'perform', filePath: path.join(dir, 'perform-diff-review.md'), invocation: '/perform-diff-review', status: 'missing', writable: true },
             { command: 'address', filePath: path.join(dir, 'address-diff-review.md'), invocation: '/address-diff-review', status: 'missing', writable: true },
+            { command: 'register', filePath: path.join(dir, 'register-for-diff-review-send.md'), invocation: '/register-for-diff-review-send', status: 'missing', writable: true },
+            { command: 'unregister', filePath: path.join(dir, 'unregister-for-diff-review-send.md'), invocation: '/unregister-for-diff-review-send', status: 'missing', writable: true },
         ],
         status: 'missing', writable: true,
     };
     const outcome = install(target);
     assert.strictEqual(outcome.errors.length, 0);
-    assert.strictEqual(outcome.written.length, 2);
+    assert.strictEqual(outcome.written.length, 4);
     assert.ok(fs.existsSync(path.join(dir, 'perform-diff-review.md')));
 });

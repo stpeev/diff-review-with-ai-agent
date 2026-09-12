@@ -37,7 +37,7 @@ notification, never the transport.
 - Remote, cloud, or SSH-hosted agent sessions. Local same-user only.
 - Changing Copilot behaviour. `workbench.action.chat.open` already works.
 - Auto-resolving comments based on what the agent subsequently does.
-- Delivering to agents other than Claude Code and Codex in v1. The roster in F1
+- Delivering to agents other than Claude Code and Codex in v1. The registry in F1
   is generic; the adapters in F3/F4 are not.
 
 ## Architecture: poke + pull
@@ -92,7 +92,7 @@ and `createPanel` refuses the prompt outright for an already-open session
 `at_mentioned` over the IDE WS carries only `{filePath, lineStart, lineEnd}`, not
 free text.
 
-## F1 — Session roster via self-registration
+## F1 — Session registry via self-registration
 
 Do not infer the target. Both agents export their own identity into **every child
 process**, and the MCP server is already a child process of each agent session.
@@ -126,7 +126,7 @@ the mode-600 `.key` file, no pid/cwd matching.
 ```ts
 interface AgentSession {
     agent: 'claude' | 'codex';
-    /** CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID. Roster key. */
+    /** CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID. Registry key. */
     sessionId: string;
     /** Human label for the picker. Claude: sessions/<pid>.json `name`. Codex: threads.name/title. */
     label: string;
@@ -148,15 +148,22 @@ socket unconnectable; for Codex, thread missing or `archived` in
 lazy, but it is an optimisation, not a dependency, and it requires the installer
 specified in `2026-09-06-agent-hook-installation.md`. v1 does not rely on it.
 
-The roster lives in memory in the extension host, rebuilt by registration. It is
+The registry lives in memory in the extension host, rebuilt by registration. It is
 not persisted — a session that outlives a window reload re-registers on its next
 tool call.
+
+Two explicit MCP tools complement automatic registration. `registerAgentSession`
+refreshes the current caller's entry and accepts a short LLM-generated `label`;
+`unregisterAgentSession` removes that caller through `POST /session/unregister`.
+The installed `/register-for-diff-review-send` and
+`/unregister-for-diff-review-send` commands expose those operations without
+requiring the user to supply a session ID.
 
 ## F2 — Binding and the target picker
 
 The Send button targets a **bound** session, not a computed one.
 
-- **0 roster entries** — today's behaviour unchanged (F6).
+- **0 registry entries** — today's behaviour unchanged (F6).
 - **1 entry** — bind silently and send.
 - **N entries** — a genuine user choice, not a guess. Show a QuickPick with real
   identity and let the user decide.
@@ -164,7 +171,7 @@ The Send button targets a **bound** session, not a computed one.
 The binding is stored per workspace in `workspaceState`
 (`diffReview.boundSession`) and surfaced on the button — *"Send to:
 diff-review-with-ai-agent-72 ▾"* — with the chevron re-opening the picker. A
-binding whose session has left the roster is treated as unbound.
+binding whose session has left the registry is treated as unbound.
 
 Picker rows are ordered by recency, using signals that need no cooperation from
 the agent:
@@ -181,7 +188,7 @@ a session never called the MCP server and so never registered.
 
 ## F3 — Claude adapter: UDS peer message
 
-Write one newline-delimited JSON frame to `socketPath` from the roster,
+Write one newline-delimited JSON frame to `socketPath` from the registry,
 authenticated with `token`.
 
 Protocol as reverse-engineered from the `[uds-messaging]` module in the bundled
@@ -298,7 +305,7 @@ One ordered path, evaluated per send, so the button never silently does nothing:
 1. Bound session + adapter succeeds → done, notify which session received it.
 2. Adapter fails or the binding is stale → mark comments pending; F5 delivers on
    the agent's next poll or Stop. Notify that it is queued, not sent.
-3. No roster entry and Copilot is present → `workbench.action.chat.open`, as
+3. No registry entry and Copilot is present → `workbench.action.chat.open`, as
    today.
 4. Otherwise → clipboard, as today.
 
@@ -313,7 +320,7 @@ rather than being left implicit in F1 and F3.
 **What is being trusted.** `POST /session/register` carries a
 `CLAUDE_CODE_MESSAGING_TOKEN` and a socket path. The IPC server listens on
 `127.0.0.1`, so any local process can call it, and a bogus registration would put
-an attacker-chosen socket in the roster — at which point pressing Send writes the
+an attacker-chosen socket in the registry — at which point pressing Send writes the
 poke text to *their* socket instead of the agent's. The poke is not secret (it is
 "go read the comments"), so the exposure is misdirection rather than disclosure;
 the real cost is a review that silently goes nowhere.
@@ -331,7 +338,7 @@ the real cost is a review that silently goes nowhere.
    dropped.
 3. Treat the token as a secret in transit and at rest-in-memory. Never log it,
    never include it in `Show MCP Server Info` output, never write it to the
-   comment store or to `workspaceState`. The roster is memory-only (F1) partly
+   comment store or to `workspaceState`. The registry is memory-only (F1) partly
    for this reason.
 
 **What is explicitly not defended against.** A hostile process running as the
@@ -362,7 +369,7 @@ try to defend it.
 | 2 | F3 rejects a bad token | Same, with a wrong `CLAUDE_CODE_MESSAGING_TOKEN`; expect a drop, not a crash. |
 | 3 | F4 delivers to a panel session | Queue to a Codex thread open in the VS Code panel; confirm the turn starts. (Confirmed already against a driven `app-server`; not yet against the panel itself.) |
 | 4 | F4 mid-turn | Queue while a turn is running; confirm it appends and the notification says so. |
-| 5 | F1 registration | Start two agent sessions in one workspace; confirm two distinct roster entries with correct labels. |
+| 5 | F1 registration | Start two agent sessions in one workspace; confirm two distinct registry entries with correct labels. |
 | 6 | F1 pruning | Kill one session; confirm its entry disappears within one liveness check. |
 | 7 | F2 picker | With three live sessions, confirm ordering matches actual last-active and that the binding persists across a window reload. |
 | 8 | F5 long-poll | With no adapter available, confirm an agent in `awaitReview` receives the review on Send. |
@@ -374,12 +381,12 @@ try to defend it.
 | 14 | Token never leaks | Grep logs, `Show MCP Server Info` output, the comment store and `workspaceState` for the messaging token after a full send cycle. |
 
 Checks 1–4 need real agent processes and cannot be unit-tested. Checks 5–7 and 9
-should be unit-testable against a pure roster/binding module in the style of
+should be unit-testable against a pure registry/binding module in the style of
 `ipc-discovery.ts`.
 
 ## Files
 
-- `src/agent-roster.ts` — **new.** Pure. Roster shape, liveness predicates,
+- `src/agent-registry.ts` — **new.** Pure. Registry shape, liveness predicates,
   recency ordering, binding resolution. No `vscode`, no `fs`, no network, same
   discipline as `ipc-discovery.ts`.
 - `src/agent-deliver.ts` — **new.** The two adapters (F3 UDS write, F4 `codex
@@ -387,7 +394,7 @@ should be unit-testable against a pure roster/binding module in the style of
   resolution (or a separate `src/agent-binary.ts` — see Open decisions).
 - `src/mcp-server.ts` — read the identity environment variables at startup and
   `POST /session/register`.
-- `src/extension.ts` — the `/session/register` IPC route, the roster instance,
+- `src/extension.ts` — the `/session/register` IPC route, the registry instance,
   the F2 picker and `workspaceState` binding, and the changed `sendThread` /
   `submitAll` paths.
 - `src/slash-commands.ts` — add the `awaitReview` loop to the installed prompts.
@@ -396,4 +403,4 @@ should be unit-testable against a pure roster/binding module in the style of
   `codex-toml`).
 - `package.json` — the `diffReview_awaitReview` language model tool and a
   re-target command.
-- `test/agent-roster.test.js` — **new.** Covers checks 5–7 and 9.
+- `test/agent-registry.test.js` — **new.** Covers checks 5–7 and 9.

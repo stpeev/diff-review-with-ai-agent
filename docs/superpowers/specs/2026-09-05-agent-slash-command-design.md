@@ -2,7 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-09-05
-**Updated:** 2026-09-06 — second command (`/perform-diff-review`), module split
+**Updated:** 2026-09-12 — registration and unregistration commands
 
 ## Problem
 
@@ -22,22 +22,26 @@ commands. None of them get one from us.
 ## Goal
 
 One command that lists every agent on the machine with a slash-command
-directory, says whether **our pair of commands** is installed and current, and
+directory, says whether **our four commands** are installed and current, and
 installs them on selection — with a copyable prompt body as the
 always-available fallback, for agents with no command directory at all.
-
-The pair is the loop, and neither half is much use alone:
 
 | Command | Direction | MCP tools |
 |---|---|---|
 | `/perform-diff-review` | agent → editor | `listDiffComments`, `createDiffComment` |
 | `/address-diff-review` | editor → agent | `listDiffComments`, `replyToDiffComment`, `resolveDiffComment` |
+| `/register-for-diff-review-send` | agent session → editor registry | `registerAgentSession` |
+| `/unregister-for-diff-review-send` | agent session → editor registry | `unregisterAgentSession` |
 
 `/perform-diff-review` reviews the branch and leaves its findings as gutter
 threads the user can read, edit, delete or accept in the editor.
 `/address-diff-review` — run afterwards, ideally in a fresh context — works
 those threads in the code. The handoff through the editor is the point: the
 human sits between the two halves.
+
+The registration commands control whether the current conversation appears as
+a direct-send target. Registration asks the LLM for a concise conversation name
+and supplies it as the session label; unregistration removes only that session.
 
 The shape deliberately mirrors `Diff Review: Register MCP Server with a Coding
 Agent` (see `2026-09-05-mcp-consumer-registration-design.md`). Same discovery
@@ -52,11 +56,10 @@ idea, same quick-pick vocabulary, same copy-is-first-class rule.
 - **Editing or removing command files other than ours.**
 - **Project-level Claude Code commands** (`.claude/commands/`). User-level only,
   matching the MCP spec's scope.
-- **Installing one half of the pair.** A row is an agent, not a file. Users who
-  install only `/perform-diff-review` get comments nothing knows how to work.
-  Per-file control exists only as a consequence of the marker rule below, which
-  can make one of the two files unwritable.
-- **Arguments to either command.** `/perform-diff-review` derives its own diff
+- **Selecting individual files during installation.** A row is an agent, not a
+  file, and installation keeps the whole Diff Review command set current.
+  Per-file control exists only as a consequence of the marker rule below.
+- **Arguments to the commands.** `/perform-diff-review` derives its own diff
   range; `/address-diff-review` works every open thread. Argument syntax differs
   across all four wrapper formats, and neither command has a use for one yet.
 - **Merging with `src/mcp-consumers.ts`.** The two modules share plumbing, not a
@@ -78,17 +81,18 @@ See **Version marker** below.
 
 ## Targets
 
-Each agent directory holds **two** files, named after the commands they define.
+Each agent directory holds **four** files, named after the commands they define.
 
 | Agent | Directory | Files | Format |
 |---|---|---|---|
-| Claude Code | `~/.claude/commands/` | `perform-diff-review.md`, `address-diff-review.md` | Markdown + YAML frontmatter |
-| Codex CLI | `~/.codex/prompts/` | `perform-diff-review.md`, `address-diff-review.md` | plain Markdown |
-| Gemini CLI | `~/.gemini/commands/` | `perform-diff-review.toml`, `address-diff-review.toml` | TOML (`description`, `prompt`) |
-| VS Code family | `<profile>/prompts/` | `perform-diff-review.prompt.md`, `address-diff-review.prompt.md` | Markdown + frontmatter |
+| Claude Code | `~/.claude/commands/` | four `.md` files | Markdown + YAML frontmatter |
+| Codex CLI | `~/.codex/prompts/` | four `.md` files | plain Markdown |
+| Gemini CLI | `~/.gemini/commands/` | four `.toml` files | TOML (`description`, `prompt`) |
+| VS Code family | `<profile>/prompts/` | four `.prompt.md` files | Markdown + frontmatter |
 
-In every case the file's basename is the invocation: `/perform-diff-review` and
-`/address-diff-review`.
+In every case the file's basename is the invocation: `perform-diff-review`,
+`address-diff-review`, `register-for-diff-review-send`, or
+`unregister-for-diff-review-send`.
 
 Codex honours `$CODEX_HOME`, as in the MCP module.
 
@@ -118,7 +122,7 @@ this feature contributes one of those too.
 
 ```ts
 type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
-type CommandId = 'perform' | 'address';
+type CommandId = 'perform' | 'address' | 'register' | 'unregister';
 type Status = 'current' | 'stale' | 'missing';
 
 interface CommandFile {
@@ -137,9 +141,9 @@ interface SlashCommandTarget {
     label: string;        // 'Claude Code', 'VS Code — profile "Work"'
     kind: CommandKind;
     dirPath: string;
-    /** Always both, in perform → address order. */
+    /** Always all four, in perform → address → register → unregister order. */
     files: CommandFile[];
-    /** Worst of the two: any missing ⇒ missing, else any stale ⇒ stale. */
+    /** Worst status: any missing ⇒ missing, else any stale ⇒ stale. */
     status: Status;
     /** True when at least one file can be written. */
     writable: boolean;
@@ -207,8 +211,8 @@ Per file, read and compare against `renderBody(kind, command)`:
 - byte-identical → `current`
 - anything else → `stale`
 
-The row's status is the worse of the two, so a half-installed agent never reads
-as done.
+The row's status is the worse of all four, so a partially installed agent never
+reads as done.
 
 ### Version marker
 
@@ -218,6 +222,8 @@ its format:
 ```
 <!-- diff-review:perform v1 -->
 <!-- diff-review:address v1 -->
+<!-- diff-review:register-send v1 -->
+<!-- diff-review:unregister-send v1 -->
 ```
 
 A `stale` file **with** its marker is a previous version of ours: safe to
@@ -228,7 +234,7 @@ copy.
 
 The rule applies per file. A hand-tuned `address-diff-review.md` does not block
 writing `perform-diff-review.md` alongside it; the row stays writable and the
-modal says which of the two will be skipped and why.
+modal says which files will be skipped and why.
 
 Each marker's version bumps only when that body changes, independently of the
 other.
@@ -240,8 +246,8 @@ dependency: the Gemini TOML files are ours alone, so we emit them rather than
 parse and edit them.
 
 `install` writes every file that is `writable` and not already `current`, and
-returns a `WriteResult` per file. A failure on the first file does not suppress
-the second: results and errors are collected, and the caller reports both.
+returns a `WriteResult` per file. A failure on one file does not suppress the
+others: results and errors are collected, and the caller reports all of them.
 
 **Backups.** Before overwriting a `stale` file, copy it to
 `<file>.diff-review-backup`, overwriting a previous backup — same convention and
@@ -249,7 +255,7 @@ same reporting as the MCP writers. Never on `missing`.
 
 ## The prompt bodies
 
-Two instruction bodies, four wrappers each. Only frontmatter differs by wrapper;
+Four instruction bodies, four wrappers each. Only frontmatter differs by wrapper;
 the Markdown below each marker is identical across all four, so each body is one
 thing to maintain and one thing to review.
 
@@ -260,7 +266,7 @@ Frontmatter per kind:
 - **`codex-md`** — none
 - **`gemini-toml`** — `description` key, body as a multi-line `prompt` string
 
-Both bodies open with the same failure check, because it is the failure everyone
+The review bodies open with the same failure check, because it is the failure everyone
 will hit first: **call `listDiffComments`; if the tool is unavailable, stop and
 tell the user to run `Diff Review: Register MCP Server with a Coding Agent`.**
 The command is useless without the MCP server.
@@ -298,7 +304,15 @@ else follow the existing `review-file` command.
 5. Never commit.
 6. Report what was addressed and what was left open.
 
-Unchanged from the previous revision but for its name.
+### `/register-for-diff-review-send`
+
+Choose a concise 3–8 word name for the current conversation and call
+`registerAgentSession` once with that name as `label`. Do no other work.
+
+### `/unregister-for-diff-review-send`
+
+Call `unregisterAgentSession` once. This removes only the current conversation
+from the session registry; it does not terminate it or remove MCP configuration.
 
 ## Command: `diffReview.installAgentCommands`
 
@@ -310,8 +324,8 @@ aggregate status:
 
 ```
 $(check)           Claude Code                      installed
-                   ~/.claude/commands/ — both commands
-$(warning)         Codex CLI                        1 of 2 installed
+                   ~/.claude/commands/ — all four commands
+$(warning)         Codex CLI                        1 of 4 installed
                    ~/.codex/prompts/
 $(warning)         VS Code — profile "Work"         installed — older version
                    .../User/profiles/work/prompts/
@@ -324,13 +338,13 @@ $(circle-outline)  Cursor                           not installed (manual)
 Each row carries a reveal-in-file-explorer button pointing at the directory,
 matching the MCP command.
 
-The label is a function of the two file statuses, not of the row status alone:
+The label is a function of all four file statuses, not of the row status alone:
 
 | Files | Label | Icon |
 |---|---|---|
-| both `current` | installed | `$(check)` |
-| both `missing` | not installed | `$(circle-outline)` |
-| one `current`, one `missing` | 1 of 2 installed | `$(warning)` |
+| all `current` | installed | `$(check)` |
+| all `missing` | not installed | `$(circle-outline)` |
+| mixed `current` / `missing` | N of 4 installed | `$(warning)` |
 | any `stale` | installed — older version | `$(warning)` |
 | any file not writable | the above, plus *(manual)* | unchanged |
 
@@ -339,16 +353,16 @@ is the one the user needs to understand before picking.
 
 **On pick:**
 
-- `current` → info message naming both invocations, no write.
-- `missing` / `stale`, `writable` → modal listing both destination paths and
-  both bodies, with before → after for a `stale` file, and an explicit line for
+- `current` → info message naming all four invocations, no write.
+- `missing` / `stale`, `writable` → modal listing the destination paths and
+  bodies, with before → after for a `stale` file, and an explicit line for
   any file being skipped under the marker rule. Buttons: **Write** / **Copy** /
   **Cancel**. Write backs up what it overwrites and reports every path written.
-- not `writable` (neither file can be written) → straight to copy.
+- not `writable` (no file can be written) → straight to copy.
 
-**Copy** opens a second quick pick — *perform / address / both* — then copies
-the chosen bodies, each preceded by its "save this to `<path>`" line. Two full
-prompt bodies on the clipboard unannounced is worse than one question, and an
+**Copy** opens a second quick pick — one command or *all four* — then copies
+the chosen bodies, each preceded by its "save this to `<path>`" line. Multiple
+prompt bodies on the clipboard unannounced are worse than one question, and an
 agent with no command directory usually wants one of them at a time.
 
 **Copy is available on every row**, including `current`. It is the entire path
@@ -368,7 +382,7 @@ at the moment the user has just finished the first.
 Every failure path ends in a copyable body rather than a dead end. Unreadable
 file, unwritable directory, permission error — all downgrade the affected
 `CommandFile` to copy-only with the reason shown, and never throw out of the
-command handler. A row is only fully copy-only when both of its files are.
+command handler. A row is only fully copy-only when all of its files are.
 
 ## Verification
 
@@ -376,10 +390,10 @@ command handler. A row is only fully copy-only when both of its files are.
 pure transforms:
 
 - per-file status detection per kind across `missing` / `current` / `stale`
-- row-status aggregation over all four combinations of two file statuses
+- row-status aggregation across the four command files
 - the marker rule: `stale` with marker is writable, `stale` without is not —
   and that one unwritable file leaves the other writable
-- body rendering: both commands across all four wrappers, frontmatter correct,
+- body rendering: all four commands across all four wrappers, frontmatter correct,
   body identical below the marker between wrappers, Gemini's TOML string
   escaping intact
 - path construction, including the nested profile `location` case that the MCP
@@ -409,7 +423,7 @@ Beyond the tests:
 
 | File | Change |
 |---|---|
-| `src/slash-commands.ts` | new — discovery, status, both bodies, writers |
+| `src/slash-commands.ts` | new — discovery, status, command bodies, writers |
 | `src/vscode-profiles.ts` | new — extracted app list, user-data roots, `parseProfiles` |
 | `src/file-write.ts` | new — extracted `readText`, `backup`, `WriteResult` |
 | `src/mcp-consumers.ts` | drop the extracted code, import it back; `parseProfiles(json, 'mcp')` |
@@ -417,5 +431,5 @@ Beyond the tests:
 | `test/vscode-profiles.test.js` | new — profile parsing with and without a flag name |
 | `src/extension.ts` | register `diffReview.installAgentCommands`, quick pick UI; MCP success follow-up |
 | `package.json` | contribute the command |
-| `README.md` | document both commands alongside MCP setup |
+| `README.md` | document all four commands alongside MCP setup |
 | `TODO.md` | record it |

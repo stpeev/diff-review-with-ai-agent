@@ -13,7 +13,7 @@ at points in the agent's lifecycle. Two of them are load-bearing for
   text and force the agent to keep going. This is the only channel that reaches
   an agent at the exact moment it goes idle, and it is the supported floor under
   the private delivery adapters.
-- **`SessionEnd`**, which would prune the session roster promptly instead of
+- **`SessionEnd`**, which would prune the session registry promptly instead of
   lazily.
 
 Nothing installs either. The delivery spec currently degrades around this — its
@@ -96,7 +96,7 @@ result, so it is no less exclusive.
 
 The payload both agents deliver on stdin carries `session_id`, `cwd` and
 `transcript_path`, which is what lets the hook tell the extension *which*
-session is stopping — the same identity the roster in the delivery spec is keyed
+session is stopping — the same identity the registry in the delivery spec is keyed
 on.
 
 ## Targets

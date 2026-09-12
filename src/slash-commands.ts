@@ -1,6 +1,8 @@
 /**
- * The two Diff Review slash commands — `/perform-diff-review` and
- * `/address-diff-review` — as installable files for every agent that reads
+ * The Diff Review slash commands — `/perform-diff-review`,
+ * `/address-diff-review`, `/register-for-diff-review-send`, and
+ * `/unregister-for-diff-review-send` — as
+ * installable files for every agent that reads
  * commands from its own directory.
  *
  * One instruction body per command, wrapped in four formats. Only the
@@ -18,27 +20,35 @@ import { readText, backup } from './file-write';
 import { VSCODE_APPS, userDataRoot, parseProfiles } from './vscode-profiles';
 import { MCP_TOOLS, sectionedPolicy } from './review-policy';
 
-export type CommandId = 'perform' | 'address';
+export type CommandId = 'perform' | 'address' | 'register' | 'unregister';
 export type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
 
 export const INVOCATION: Record<CommandId, string> = {
     perform: '/perform-diff-review',
     address: '/address-diff-review',
+    register: '/register-for-diff-review-send',
+    unregister: '/unregister-for-diff-review-send',
 };
 
 export const MARKER: Record<CommandId, string> = {
     perform: '<!-- diff-review:perform v1 -->',
     address: '<!-- diff-review:address v2 -->',
+    register: '<!-- diff-review:register-send v1 -->',
+    unregister: '<!-- diff-review:unregister-send v1 -->',
 };
 
 const DESCRIPTION: Record<CommandId, string> = {
     perform: 'Review the current branch against its merge-base and leave inline Diff Review comments on what you find',
     address: 'Work every open Diff Review comment thread: reply, and change code where asked',
+    register: 'Register this conversation as a target for Diff Review Send actions',
+    unregister: 'Stop routing Diff Review Send actions to this conversation',
 };
 
 const ALLOWED_TOOLS: Record<CommandId, string> = {
     perform: 'Bash, Read, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__createDiffComment',
     address: 'Bash, Read, Edit, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__replyToDiffComment, mcp__diff-review__resolveDiffComment',
+    register: 'mcp__diff-review__registerAgentSession',
+    unregister: 'mcp__diff-review__unregisterAgentSession',
 };
 
 // --------------- The shared instructional bodies ---------------
@@ -129,6 +139,29 @@ reviewing. Each wait returns within 45 seconds so it stays below the configured
 60-second MCP tool timeout.
 
 ${sectionedPolicy({ tools: MCP_TOOLS, threadRef: 'listed' }, 2)}`,
+    register: `${MARKER.register}
+
+# Register for Diff Review Send
+
+Choose a concise, human-readable name of 3–8 words that describes the current
+conversation. Call the Diff Review MCP tool \`registerAgentSession\` once, passing
+that name as its \`label\`. Do not inspect files, review changes, or perform any
+other work. Report the tool's result to the user.
+
+If the tool is unavailable, tell the user to run **\`Diff Review: Register MCP
+Server with a Coding Agent\`** from the command palette, then retry this command.
+`,
+    unregister: `${MARKER.unregister}
+
+# Unregister from Diff Review Send
+
+Call the Diff Review MCP tool \`unregisterAgentSession\` once. Do not inspect
+files, review changes, or perform any other work. Report the tool's result to
+the user.
+
+This removes only the current conversation from Diff Review's Send targets. It
+does not terminate the conversation or remove the MCP server configuration.
+`,
 };
 
 // --------------- Per-format wrapping ---------------
@@ -199,9 +232,9 @@ export interface SlashCommandTarget {
     label: string;
     kind: CommandKind;
     dirPath: string;
-    /** Always both, in perform → address order. */
+    /** Always all four, in perform → address → register → unregister order. */
     files: CommandFile[];
-    /** Worst of the two: any `missing` ⇒ missing, else any `stale` ⇒ stale. */
+    /** Worst status: any `missing` ⇒ missing, else any `stale` ⇒ stale. */
     status: Status;
     /** True when at least one file can be written. */
     writable: boolean;
@@ -215,7 +248,10 @@ const EXT: Record<CommandKind, string> = {
 };
 
 function fileName(command: CommandId, kind: CommandKind): string {
-    return `${command}-diff-review.${EXT[kind]}`;
+    const base = command === 'register'
+        ? 'register-for-diff-review-send'
+        : command === 'unregister' ? 'unregister-for-diff-review-send' : `${command}-diff-review`;
+    return `${base}.${EXT[kind]}`;
 }
 
 function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): CommandFile {
@@ -236,7 +272,7 @@ function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): Co
 const STATUS_RANK: Record<Status, number> = { missing: 2, stale: 1, current: 0 };
 
 function buildTarget(id: string, label: string, kind: CommandKind, dirPath: string): SlashCommandTarget {
-    const files = (['perform', 'address'] as CommandId[]).map(command => inspectFile(dirPath, command, kind));
+    const files = (['perform', 'address', 'register', 'unregister'] as CommandId[]).map(command => inspectFile(dirPath, command, kind));
     const status = files.reduce<Status>(
         (worst, f) => (STATUS_RANK[f.status] > STATUS_RANK[worst] ? f.status : worst),
         'current',
@@ -252,7 +288,7 @@ export interface DiscoveryEnv {
 
 /**
  * Every agent on this machine with a slash-command directory, and whether
- * our two commands are installed and current in it.
+ * our commands are installed and current in it.
  *
  * A row exists for Claude Code / Codex / Gemini when the agent's *home*
  * directory exists — `~/.codex` proves Codex is installed, the same evidence
@@ -330,7 +366,7 @@ export interface InstallOutcome {
 /**
  * Write every file in `target` that is writable and not already current.
  * A failure writing one file does not stop the other from being attempted;
- * both successes and failures are reported so the caller can show both.
+ * successes and failures are both reported so the caller can show each.
  */
 export function install(target: SlashCommandTarget): InstallOutcome {
     const written: SlashWriteResult[] = [];

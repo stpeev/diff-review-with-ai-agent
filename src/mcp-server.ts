@@ -21,9 +21,9 @@ import {
     Descriptor, descriptorDir, resolvePort, ResolveResult,
     NoServerError, AmbiguousPortError,
 } from './ipc-discovery';
-import { claudePidFromSocketPath, codexThreadIdFromMeta } from './agent-roster';
+import { claudePidFromSocketPath, codexThreadIdFromMeta } from './agent-registry';
 import { diagnosticEnvironment, sanitizeDiagnostic } from './agent-diagnostics';
-import { claudeSessionLabel, codexSessionLabel } from './agent-label';
+import { claudeSessionLabel, codexSessionLabel, normalizeAgentLabel } from './agent-label';
 
 // ---------- IPC target resolution ----------
 
@@ -215,15 +215,17 @@ function writeStartupDiagnostic(event: string, details: Record<string, unknown>)
     }
 }
 
-interface RegistrationOutcome { ok: boolean; error?: string; }
+interface RegistrationOutcome { ok: boolean; error?: string; label?: string; }
 const codexRegistrations = new Map<string, Promise<RegistrationOutcome>>();
+const claudeRegistrations = new Map<string, Promise<RegistrationOutcome>>();
 
-function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
-    const existing = codexRegistrations.get(sessionId);
+function registerCodexSession(sessionId: string, requestedLabel?: string): Promise<RegistrationOutcome> {
+    const humanLabel = normalizeAgentLabel(requestedLabel);
+    const existing = humanLabel ? undefined : codexRegistrations.get(sessionId);
     if (existing) return existing;
 
     const sessionName = `codex:${sessionId.slice(-6)}`;
-    const label = codexSessionLabel(sessionId) ?? `Codex ${sessionId.slice(-6)}`;
+    const label = humanLabel ?? codexSessionLabel(sessionId) ?? `Codex ${sessionId.slice(-6)}`;
     const registration = (async () => {
         mcpLog(`Registering agent session ${sessionName} with the workspace extension`);
         try {
@@ -234,7 +236,7 @@ function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
                 label,
             });
             mcpLog(`Registered agent session ${sessionName}`);
-            return { ok: true };
+            return { ok: true, label };
         } catch (error: any) {
             codexRegistrations.delete(sessionId);
             mcpLog(`Session registration failed for ${sessionName}: ${error.message ?? error}`);
@@ -245,20 +247,91 @@ function registerCodexSession(sessionId: string): Promise<RegistrationOutcome> {
     return registration;
 }
 
+function registerClaudeSession(sessionId: string, requestedLabel?: string): Promise<RegistrationOutcome> {
+    const humanLabel = normalizeAgentLabel(requestedLabel);
+    const existing = humanLabel ? undefined : claudeRegistrations.get(sessionId);
+    if (existing) return existing;
+
+    const socketPath = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const pid = process.env.CLAUDE_PID
+        ? Number(process.env.CLAUDE_PID)
+        : claudePidFromSocketPath(socketPath);
+    const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const sessionName = `claude:${sessionId.slice(-6)}`;
+    const label = humanLabel ?? claudeSessionLabel(pid, sessionId) ?? `Claude ${sessionId.slice(-6)}`;
+    const registration = (async () => {
+        mcpLog(
+            `Claude messaging context for ${sessionName}: ` +
+            `socket=${socketPath ? 'present' : 'missing'}, ` +
+            `token=${process.env.CLAUDE_CODE_MESSAGING_TOKEN ? 'present' : 'missing'}, ` +
+            `pid=${pid ?? 'unavailable'}, project=${cwd}`
+        );
+        mcpLog(`Registering agent session ${sessionName} (${label}) with the workspace extension`);
+        try {
+            await ipcPost('/session/register', {
+                agent: 'claude', sessionId, cwd, label, socketPath,
+                token: process.env.CLAUDE_CODE_MESSAGING_TOKEN, pid,
+            });
+            mcpLog(`Registered agent session ${sessionName} (${label})`);
+            return { ok: true, label };
+        } catch (error: any) {
+            claudeRegistrations.delete(sessionId);
+            mcpLog(`Session registration failed for ${sessionName}: ${error.message ?? error}`);
+            return { ok: false, error: error.message ?? String(error), label };
+        }
+    })();
+    claudeRegistrations.set(sessionId, registration);
+    return registration;
+}
+
 server.tool(
     'registerAgentSession',
-    'Register this Codex conversation as a target for direct Diff Review delivery',
+    'Register this agent conversation as a target for direct Diff Review delivery',
+    {
+        label: z.string().optional().describe('A short human-readable name for this conversation, derived from its topic'),
+    },
+    async ({ label }, extra) => {
+        const codexSessionId = codexThreadIdFromMeta(extra._meta);
+        const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+        if (!codexSessionId && !claudeSessionId) {
+            return { content: [{ type: 'text' as const, text:
+                'Could not register this agent session: no supported Claude session ID or Codex thread ID was available.' }] };
+        }
+        const agent = codexSessionId ? 'Codex' : 'Claude';
+        const sessionId = codexSessionId ?? claudeSessionId!;
+        const outcome = codexSessionId
+            ? await registerCodexSession(codexSessionId, label)
+            : await registerClaudeSession(claudeSessionId!, label);
+        return { content: [{ type: 'text' as const, text: outcome.ok
+            ? `Registered ${agent} session "${outcome.label ?? sessionId.slice(-6)}" for direct Diff Review delivery.`
+            : `Could not register this ${agent} session: ${outcome.error}` }] };
+    }
+);
+
+server.tool(
+    'unregisterAgentSession',
+    'Remove this agent conversation as a target for direct Diff Review delivery',
     {},
     async (_args, extra) => {
-        const sessionId = codexThreadIdFromMeta(extra._meta);
-        if (!sessionId) {
+        const codexSessionId = codexThreadIdFromMeta(extra._meta);
+        const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
+        if (!codexSessionId && !claudeSessionId) {
             return { content: [{ type: 'text' as const, text:
-                'Could not register this agent session: the MCP tool call did not include a Codex thread ID.' }] };
+                'Could not unregister this agent session: no supported Claude session ID or Codex thread ID was available.' }] };
         }
-        const outcome = await registerCodexSession(sessionId);
-        return { content: [{ type: 'text' as const, text: outcome.ok
-            ? `Registered Codex session ${sessionId.slice(-6)} for direct Diff Review delivery.`
-            : `Could not register this Codex session: ${outcome.error}` }] };
+        const agent = codexSessionId ? 'Codex' : 'Claude';
+        const sessionId = codexSessionId ?? claudeSessionId!;
+        try {
+            await ipcPost('/session/unregister', { sessionId });
+            codexRegistrations.delete(sessionId);
+            claudeRegistrations.delete(sessionId);
+            mcpLog(`Unregistered agent session ${agent.toLowerCase()}:${sessionId.slice(-6)}`);
+            return { content: [{ type: 'text' as const, text:
+                `Unregistered ${agent} session ${sessionId.slice(-6)} from direct Diff Review delivery.` }] };
+        } catch (error: any) {
+            return { content: [{ type: 'text' as const, text:
+                `Could not unregister this ${agent} session: ${error.message ?? error}` }] };
+        }
     }
 );
 
@@ -401,32 +474,7 @@ async function main() {
     const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
     const codexThreadId = process.env.CODEX_THREAD_ID;
     if (claudeSessionId) {
-        const socketPath = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
-        const pid = process.env.CLAUDE_PID
-            ? Number(process.env.CLAUDE_PID)
-            : claudePidFromSocketPath(socketPath);
-        const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-        const sessionName = `claude:${claudeSessionId.slice(-6)}`;
-        const label = claudeSessionLabel(pid, claudeSessionId) ?? `Claude ${claudeSessionId.slice(-6)}`;
-        mcpLog(
-            `Claude messaging context for ${sessionName}: ` +
-            `socket=${socketPath ? 'present' : 'missing'}, ` +
-            `token=${process.env.CLAUDE_CODE_MESSAGING_TOKEN ? 'present' : 'missing'}, ` +
-            `pid=${pid ?? 'unavailable'}, project=${cwd}`
-        );
-        mcpLog(`Detected agent session ${sessionName}; registering with the workspace extension`);
-        try {
-            await ipcPost('/session/register', {
-                agent: 'claude', sessionId: claudeSessionId, cwd,
-                label,
-                socketPath,
-                token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
-                pid,
-            });
-            mcpLog(`Registered agent session ${sessionName}`);
-        } catch (error: any) {
-            mcpLog(`Session registration failed for ${sessionName}: ${error.message ?? error}`);
-        }
+        await registerClaudeSession(claudeSessionId);
     } else if (codexThreadId) {
         await registerCodexSession(codexThreadId);
     } else {

@@ -52,7 +52,7 @@ const targets = {
     'slash-commands': { ...shared, entryPoints: ['src/slash-commands.ts'], outfile: 'out/test/slash-commands.js', target: 'node18' },
     'review-policy': { ...shared, entryPoints: ['src/review-policy.ts'], outfile: 'out/test/review-policy.js', target: 'node18' },
     'git-scope': { ...shared, entryPoints: ['src/git-scope.ts'], outfile: 'out/test/git-scope.js', target: 'node18' },
-    'agent-roster': { ...shared, entryPoints: ['src/agent-roster.ts'], outfile: 'out/test/agent-roster.js', target: 'node18' },
+    'agent-registry': { ...shared, entryPoints: ['src/agent-registry.ts'], outfile: 'out/test/agent-registry.js', target: 'node18' },
     'agent-deliver': { ...shared, entryPoints: ['src/agent-deliver.ts'], outfile: 'out/test/agent-deliver.js', target: 'node18' },
     'agent-diagnostics': { ...shared, entryPoints: ['src/agent-diagnostics.ts'], outfile: 'out/test/agent-diagnostics.js', target: 'node18' },
     'agent-label': { ...shared, entryPoints: ['src/agent-label.ts'], outfile: 'out/test/agent-label.js', target: 'node18' },
@@ -72,7 +72,7 @@ const groups = {
     standalone: [
         'consumers', 'file-write', 'vscode-profiles', 'slash-commands',
         'ipc-discovery', 'scope-id', 'comment-store', 'path-util', 'git-scope',
-        'review-policy', 'agent-roster', 'agent-deliver', 'agent-diagnostics', 'agent-label',
+        'review-policy', 'agent-registry', 'agent-deliver', 'agent-diagnostics', 'agent-label',
     ],
 };
 

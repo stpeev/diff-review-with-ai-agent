@@ -114,7 +114,7 @@ Agent: [calls #listDiffComments] → sees 3 open comments
 `#createDiffComment` also enables a reviewer/implementer split across two agents: one posts comments against the diff, the other lists and addresses them — no human needs to seed the threads by hand first.
 
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
-The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `createDiffComment`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`.
+The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `awaitReview`, `createDiffComment`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`, `registerAgentSession`, and `unregisterAgentSession`.
 
 **The quick way:** run **`Diff Review: Register MCP Server with a Coding Agent`** from the command palette. It lists every MCP consumer it can find on your machine — VS Code and its forks (including per-profile configs), Codex CLI, Claude Code — and shows whether `diff-review` is registered with each:
 
@@ -175,7 +175,7 @@ To check it by hand:
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   | node ~/.diff-review/mcp-launcher.js
 ```
-It should print a JSON list of the four tools. The launcher speaks JSON-RPC on stdin/stdout, so run on its own it will just sit and wait for input — that is correct behaviour, not a hang.
+It should print a JSON list of the eight tools. The launcher speaks JSON-RPC on stdin/stdout, so run on its own it will just sit and wait for input — that is correct behaviour, not a hang.
 
 **Working on the extension itself?** Set `DIFF_REVIEW_SERVER` to override resolution and load your local build:
 ```bash
@@ -197,8 +197,8 @@ In order of preference:
 ### Agent Slash Commands
 
 Once the MCP server is registered, run **`Diff Review: Install the Diff
-Review Agent Commands`** from the command palette to install a matching pair
-of slash commands into any agent that reads commands from its own directory
+Review Agent Commands`** from the command palette to install four slash
+commands into any agent that reads commands from its own directory
 — Claude Code, Codex CLI, Gemini CLI, and VS Code's own Copilot Chat (per
 profile):
 
@@ -207,12 +207,16 @@ profile):
   edits code, never commits.
 - **`/address-diff-review`** — works every open comment thread: makes the
   change, replies, and resolves.
+- **`/register-for-diff-review-send`** — gives the current conversation a
+  concise name and registers it as a target for individual Send actions.
+- **`/unregister-for-diff-review-send`** — removes the current conversation
+  from the available Send targets without ending it.
 
-Run them as a pair, with a human reading the comments in between: perform a
+Run the first two as a pair, with a human reading the comments in between: perform a
 review, look at what landed in the gutter, then address it — ideally in a
 fresh agent session so it isn't anchored to its own review.
 
-The command lists every agent it finds and whether both commands are
+The command lists every agent it finds and whether all commands are
 installed and current in each, matching the same discovery style as MCP
 registration. Cursor and Windsurf use workspace-scoped command directories,
 so they get a copy-only row pointing at where to paste the prompt by hand.

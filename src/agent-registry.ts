@@ -13,7 +13,7 @@ export interface AgentSession {
     recency?: number;
 }
 
-export class AgentRoster {
+export class AgentRegistry {
     private readonly sessions = new Map<string, AgentSession>();
 
     register(input: Omit<AgentSession, 'registeredAt' | 'lastSeenAt'>, now = new Date()): AgentSession {

@@ -15,7 +15,7 @@ import { LM_TOOLS, MCP_TOOLS, PolicyTools, prosePolicy } from './review-policy';
 import { gitScopeFor } from './git-scope';
 import * as ipcDiscovery from './ipc-discovery';
 import * as scopeIdMod from './scope-id';
-import { AgentRoster, AgentSession, claudePidFromSocketPath, resolveBinding } from './agent-roster';
+import { AgentRegistry, AgentSession, claudePidFromSocketPath, resolveBinding } from './agent-registry';
 import { deliverToSession } from './agent-deliver';
 import {
     Role, ThreadStatus, SerializedComment, SerializedThread, BranchState, ScopeFile,
@@ -980,7 +980,7 @@ let ipcServer: http.Server | undefined;
 let ipcPort: number = 0;
 let myWorkspaceRoots: string[] = [];
 let descriptorFilePath: string | undefined;
-const agentRoster = new AgentRoster();
+const agentRegistry = new AgentRegistry();
 let reviewGeneration = 0;
 const reviewWaiters = new Set<(generation: number) => void>();
 
@@ -1002,7 +1002,7 @@ function cwdInWorkspace(cwd: string): boolean {
 }
 
 async function selectAgentSession(forcePicker = false): Promise<AgentSession | undefined> {
-    const sessions = agentRoster.list();
+    const sessions = agentRegistry.list();
     if (sessions.length === 0) return undefined;
     const key = 'diffReview.boundSession';
     const boundId = extensionContext.workspaceState.get<string>(key);
@@ -1028,7 +1028,7 @@ async function selectAgentSession(forcePicker = false): Promise<AgentSession | u
 
 async function deliverOrFallback(targetThreads: vscode.CommentThread[]): Promise<void> {
     const count = targetThreads.length;
-    const sessions = agentRoster.list();
+    const sessions = agentRegistry.list();
     if (sessions.length > 0) {
         const session = await selectAgentSession();
         if (!session) return;
@@ -1136,6 +1136,19 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                         res.writeHead(200); res.end(JSON.stringify({ pending: true, generation }));
                     };
                     reviewWaiters.add(done);
+                } else if (method === 'POST' && url.pathname === '/session/unregister') {
+                    const data = JSON.parse(await readBody(req));
+                    if (!checkWorkspaceRoot(data.expectWorkspaceRoot)) { respondMismatch(res); return; }
+                    if (typeof data.sessionId !== 'string' || !data.sessionId) {
+                        res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid agent session ID' })); return;
+                    }
+                    const session = agentRegistry.get(data.sessionId);
+                    agentRegistry.remove(data.sessionId);
+                    if (extensionContext.workspaceState.get<string>('diffReview.boundSession') === data.sessionId) {
+                        await extensionContext.workspaceState.update('diffReview.boundSession', undefined);
+                    }
+                    log(`[Diff Review] Unregistered agent session ${session ? `${session.label} [${sessionLogName(session)}]` : data.sessionId.slice(-6)} (${agentRegistry.list().length} active session(s))`);
+                    res.writeHead(200); res.end(JSON.stringify({ ok: true, removed: session !== undefined }));
                 } else if (method === 'POST' && url.pathname === '/session/register') {
                     const data = JSON.parse(await readBody(req));
                     if (!checkWorkspaceRoot(data.expectWorkspaceRoot) || typeof data.cwd !== 'string' || !cwdInWorkspace(data.cwd)) {
@@ -1163,8 +1176,8 @@ function startIpcServer(context: vscode.ExtensionContext): Promise<number> {
                             res.writeHead(400); res.end(JSON.stringify({ error: 'Claude session identity could not be verified' })); return;
                         }
                     }
-                    const session = agentRoster.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.agent === 'claude' ? claudePidFromSocketPath(data.socketPath) : data.pid });
-                    log(`[Diff Review] Registered agent session ${session.label} [${sessionLogName(session)}] (${agentRoster.list().length} active session(s))`);
+                    const session = agentRegistry.register({ agent: data.agent, sessionId: data.sessionId, label: data.label || `${data.agent}-${data.sessionId.slice(-6)}`, cwd: data.cwd, socketPath: data.socketPath, token: data.token, pid: data.agent === 'claude' ? claudePidFromSocketPath(data.socketPath) : data.pid });
+                    log(`[Diff Review] Registered agent session ${session.label} [${sessionLogName(session)}] (${agentRegistry.list().length} active session(s))`);
                     res.writeHead(200); res.end(JSON.stringify({ ok: true }));
                 } else if (method === 'POST' && url.pathname === '/reply') {
                     const body = await readBody(req);
@@ -2078,7 +2091,7 @@ function slashRowIcon(target: SlashCommandTarget): string {
     if (target.files.some(f => f.status === 'stale')) return '$(warning)';
     if (target.status === 'current') return '$(check)';
     if (target.status === 'missing' && target.files.every(f => f.status === 'missing')) return '$(circle-outline)';
-    return '$(warning)'; // one current, one missing
+    return '$(warning)'; // Partially installed.
 }
 
 function slashRowLabel(target: SlashCommandTarget): string {
@@ -2101,7 +2114,9 @@ async function pickAndCopySlashCommands(target: SlashCommandTarget) {
         [
             { label: INVOCATION.perform, command: 'perform' as CommandId },
             { label: INVOCATION.address, command: 'address' as CommandId },
-            { label: 'Both', command: undefined },
+            { label: INVOCATION.register, command: 'register' as CommandId },
+            { label: INVOCATION.unregister, command: 'unregister' as CommandId },
+            { label: 'All four', command: undefined },
         ],
         { title: `Copy which command for ${target.label}?` },
     );
@@ -2111,21 +2126,21 @@ async function pickAndCopySlashCommands(target: SlashCommandTarget) {
         await copySlashCommand(target, choice.command);
         return;
     }
-    const text = (['perform', 'address'] as CommandId[]).map(c => renderClipboard(target, c)).join('\n\n');
+    const text = (['perform', 'address', 'register', 'unregister'] as CommandId[]).map(c => renderClipboard(target, c)).join('\n\n');
     await vscode.env.clipboard.writeText(text);
     vscode.window.showInformationMessage(
-        `Diff Review: copied both commands for ${target.label} to the clipboard.`);
+        `Diff Review: copied all four commands for ${target.label} to the clipboard.`);
 }
 
 /**
- * Confirm, then write both files. Every failure path ends at the clipboard
+ * Confirm, then write the command files. Every failure path ends at the clipboard
  * rather than a dead end, so a file we cannot write is still one the user
  * can paste in by hand.
  */
 async function installSlashCommands(target: SlashCommandTarget) {
     if (target.status === 'current') {
         vscode.window.showInformationMessage(
-            `Diff Review: ${target.label} already has ${INVOCATION.perform} and ${INVOCATION.address}.`);
+            `Diff Review: ${target.label} already has all Diff Review agent commands.`);
         return;
     }
 
@@ -2200,7 +2215,7 @@ async function showSlashCommandTargets() {
 
     const picker = vscode.window.createQuickPick<typeof items[number]>();
     picker.title = 'Diff Review — Install Agent Slash Commands';
-    picker.placeholder = 'Select an agent to install /perform-diff-review and /address-diff-review';
+    picker.placeholder = 'Select an agent to install the Diff Review commands';
     picker.matchOnDetail = true;
     picker.items = items;
 
