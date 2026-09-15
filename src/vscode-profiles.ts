@@ -8,18 +8,18 @@
 import * as path from 'path';
 
 export interface AppSpec {
-    id: string;
-    label: string;
-    /** Directory name under the platform's user-data root. */
-    dir: string;
+  id: string;
+  label: string;
+  /** Directory name under the platform's user-data root. */
+  dir: string;
 }
 
 export const VSCODE_APPS: AppSpec[] = [
-    { id: 'vscode', label: 'VS Code', dir: 'Code' },
-    { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
-    { id: 'vscodium', label: 'VSCodium', dir: 'VSCodium' },
-    { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
-    { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
+  { id: 'vscode', label: 'VS Code', dir: 'Code' },
+  { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
+  { id: 'vscodium', label: 'VSCodium', dir: 'VSCodium' },
+  { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
+  { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
 ];
 
 /**
@@ -30,24 +30,24 @@ export const VSCODE_APPS: AppSpec[] = [
  * win32 path from a POSIX host needs win32 separators back.
  */
 function pathFor(platform: NodeJS.Platform) {
-    return platform === 'win32' ? path.win32 : path.posix;
+  return platform === 'win32' ? path.win32 : path.posix;
 }
 
 /** Where a platform keeps `<App>/User/`. */
 export function userDataRoot(app: AppSpec, home: string, platform: NodeJS.Platform): string {
-    const p = pathFor(platform);
-    if (platform === 'win32') {
-        const appData = process.env.APPDATA || p.join(home, 'AppData', 'Roaming');
-        return p.join(appData, app.dir, 'User');
-    }
-    if (platform === 'darwin') return p.join(home, 'Library', 'Application Support', app.dir, 'User');
-    return p.join(home, '.config', app.dir, 'User');
+  const p = pathFor(platform);
+  if (platform === 'win32') {
+    const appData = process.env.APPDATA || p.join(home, 'AppData', 'Roaming');
+    return p.join(appData, app.dir, 'User');
+  }
+  if (platform === 'darwin') return p.join(home, 'Library', 'Application Support', app.dir, 'User');
+  return p.join(home, '.config', app.dir, 'User');
 }
 
 export interface ProfileRef {
-    /** Path under `profiles/`, which may be nested (e.g. "builtin/agents"). */
-    location: string;
-    name: string;
+  /** Path under `profiles/`, which may be nested (e.g. "builtin/agents"). */
+  location: string;
+  name: string;
 }
 
 /**
@@ -65,12 +65,16 @@ export interface ProfileRef {
  * get every profile.
  */
 export function parseProfiles(storageJson: string | null, defaultFlag?: string): ProfileRef[] {
-    if (!storageJson) return [];
-    let profiles: any;
-    try { profiles = JSON.parse(storageJson).userDataProfiles; } catch { return []; }
-    if (!Array.isArray(profiles)) return [];
-    return profiles
-        .filter(p => typeof p?.location === 'string' && typeof p?.name === 'string')
-        .filter(p => !defaultFlag || p.useDefaultFlags?.[defaultFlag] !== true)
-        .map(p => ({ location: p.location as string, name: p.name as string }));
+  if (!storageJson) return [];
+  let profiles: any;
+  try {
+    profiles = JSON.parse(storageJson).userDataProfiles;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(profiles)) return [];
+  return profiles
+    .filter((p) => typeof p?.location === 'string' && typeof p?.name === 'string')
+    .filter((p) => !defaultFlag || p.useDefaultFlags?.[defaultFlag] !== true)
+    .map((p) => ({ location: p.location as string, name: p.name as string }));
 }

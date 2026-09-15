@@ -21,37 +21,37 @@
  * thing to author and one thing to review.
  *
  * Pure: no `vscode` import, so it is requirable under plain `node --test`.
- * See test/review-policy.test.js.
+ * See src/review-policy.test.ts.
  */
 
 /** What the reply and resolve tools are called in the target agent's session. */
 export interface PolicyTools {
-    reply: string;
-    resolve: string;
+  reply: string;
+  resolve: string;
 }
 
 /** How the agent gets hold of the threads it is being asked to work. */
 export type ThreadRef =
-    /** Threads are inlined in the prompt, each headed with `(Thread #N)`. */
-    | 'inline'
-    /** The agent lists threads itself through the MCP server. */
-    | 'listed';
+  /** Threads are inlined in the prompt, each headed with `(Thread #N)`. */
+  | 'inline'
+  /** The agent lists threads itself through the MCP server. */
+  | 'listed';
 
 export interface PolicyOptions {
-    tools: PolicyTools;
-    threadRef: ThreadRef;
+  tools: PolicyTools;
+  threadRef: ThreadRef;
 }
 
 /** The MCP tool names, used by the installed slash commands. */
 export const MCP_TOOLS: PolicyTools = {
-    reply: 'replyToDiffComment',
-    resolve: 'resolveDiffComment',
+  reply: 'replyToDiffComment',
+  resolve: 'resolveDiffComment',
 };
 
 /** The VS Code language-model tool names, used by the in-editor chat prompt. */
 export const LM_TOOLS: PolicyTools = {
-    reply: 'diffReview_replyToComment',
-    resolve: 'diffReview_resolveComment',
+  reply: 'diffReview_replyToComment',
+  resolve: 'diffReview_resolveComment',
 };
 
 /**
@@ -61,38 +61,42 @@ export const LM_TOOLS: PolicyTools = {
  * use. Steps are ordered: triage, reply, resolve, never commit, report.
  */
 export function addressSteps({ tools, threadRef }: PolicyOptions): { heading: string; body: string }[] {
-    const identify = threadRef === 'inline'
-        ? 'Each comment heading carries its thread ID as "(Thread #N)"; use that N as the threadId ' +
-          'for the tools below.'
-        : 'Go through them oldest-first.';
+  const identify =
+    threadRef === 'inline'
+      ? 'Each comment heading carries its thread ID as "(Thread #N)"; use that N as the threadId ' +
+        'for the tools below.'
+      : 'Go through them oldest-first.';
 
-    return [
-        {
-            heading: 'Inspect each open thread',
-            body: `${identify} Read the full thread and the surrounding context, then decide how to ` +
-                'handle it — answer, edit a doc, or change code.',
-        },
-        {
-            heading: 'Reply to every thread you touch',
-            body: `Call \`${tools.reply}\` (with threadId and text) stating exactly what changed — or, if ` +
-                'you decided not to change anything, why not. Do not resolve a thread without replying to ' +
-                'it first.',
-        },
-        {
-            heading: 'Resolve only what you actually addressed',
-            body: `Call \`${tools.resolve}\` (with threadId) only on threads you changed code for (or ` +
-                'explicitly decided, with a stated reason, needed no change). Leave anything you could ' +
-                'not act on open.',
-        },
-        {
-            heading: 'Never commit',
-            body: "Committing stays the user's call.",
-        },
-        {
-            heading: 'Report',
-            body: 'State what you addressed, what you left open, and why.',
-        },
-    ];
+  return [
+    {
+      heading: 'Inspect each open thread',
+      body:
+        `${identify} Read the full thread and the surrounding context, then decide how to ` +
+        'handle it — answer, edit a doc, or change code.',
+    },
+    {
+      heading: 'Reply to every thread you touch',
+      body:
+        `Call \`${tools.reply}\` (with threadId and text) stating exactly what changed — or, if ` +
+        'you decided not to change anything, why not. Do not resolve a thread without replying to ' +
+        'it first.',
+    },
+    {
+      heading: 'Resolve only what you actually addressed',
+      body:
+        `Call \`${tools.resolve}\` (with threadId) only on threads you changed code for (or ` +
+        'explicitly decided, with a stated reason, needed no change). Leave anything you could ' +
+        'not act on open.',
+    },
+    {
+      heading: 'Never commit',
+      body: "Committing stays the user's call.",
+    },
+    {
+      heading: 'Report',
+      body: 'State what you addressed, what you left open, and why.',
+    },
+  ];
 }
 
 /**
@@ -102,15 +106,18 @@ export function addressSteps({ tools, threadRef }: PolicyOptions): { heading: st
  * wrapping buys nothing, so it is left as one line per step.
  */
 function wrap(text: string, width = 76): string {
-    const out: string[] = [];
-    let line = '';
-    for (const word of text.split(' ')) {
-        if (line === '') line = word;
-        else if (line.length + 1 + word.length <= width) line += ` ${word}`;
-        else { out.push(line); line = word; }
+  const out: string[] = [];
+  let line = '';
+  for (const word of text.split(' ')) {
+    if (line === '') line = word;
+    else if (line.length + 1 + word.length <= width) line += ` ${word}`;
+    else {
+      out.push(line);
+      line = word;
     }
-    if (line !== '') out.push(line);
-    return out.join('\n');
+  }
+  if (line !== '') out.push(line);
+  return out.join('\n');
 }
 
 /**
@@ -119,9 +126,9 @@ function wrap(text: string, width = 76): string {
  * caller with a preamble step can continue its own numbering.
  */
 export function sectionedPolicy(opts: PolicyOptions, startAt = 1): string {
-    return addressSteps(opts)
-        .map((step, i) => `### ${startAt + i}. ${step.heading}\n\n${wrap(step.body)}\n`)
-        .join('\n');
+  return addressSteps(opts)
+    .map((step, i) => `### ${startAt + i}. ${step.heading}\n\n${wrap(step.body)}\n`)
+    .join('\n');
 }
 
 /**
@@ -129,7 +136,7 @@ export function sectionedPolicy(opts: PolicyOptions, startAt = 1): string {
  * stream of text rather than a structured document.
  */
 export function prosePolicy(opts: PolicyOptions): string {
-    return addressSteps(opts)
-        .map(step => `- **${step.heading}.** ${step.body}`)
-        .join('\n');
+  return addressSteps(opts)
+    .map((step) => `- **${step.heading}.** ${step.body}`)
+    .join('\n');
 }

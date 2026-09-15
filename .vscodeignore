@@ -9,10 +9,12 @@ gen-icon.js
 **/*.ts
 .gitignore
 scripts
+test
 TODO.md
 .sandbox
-# Standalone builds of pure modules, built only so `node --test` can require
-# them outside a VS Code host (see esbuild.config.js's `standalone` group) —
-# each one already ships inside out/extension.js via its own imports, so the
-# loose copy here is dead weight in the packaged extension.
-out/test
+coverage
+.github
+AGENTS.md
+eslint.config.mjs
+tsconfig.test.json
+.prettierrc.json

@@ -8,11 +8,11 @@ import * as path from 'path';
 
 /** True when `root` is `target` itself, or a filesystem ancestor of it. */
 export function isAncestor(root: string, target: string): boolean {
-    const r = path.resolve(root);
-    const t = path.resolve(target);
-    if (r === t) return true;
-    const withSep = r.endsWith(path.sep) ? r : r + path.sep;
-    return t.startsWith(withSep);
+  const r = path.resolve(root);
+  const t = path.resolve(target);
+  if (r === t) return true;
+  const withSep = r.endsWith(path.sep) ? r : r + path.sep;
+  return t.startsWith(withSep);
 }
 
 /**
@@ -22,8 +22,27 @@ export function isAncestor(root: string, target: string): boolean {
  * trusting it to stay inside the workspace.
  */
 export function resolveWithinRoot(root: string, relPath: string): string | undefined {
-    const resolved = path.resolve(root, relPath);
-    return isAncestor(root, resolved) ? resolved : undefined;
+  const resolved = path.resolve(root, relPath);
+  return isAncestor(root, resolved) ? resolved : undefined;
+}
+
+export type WorkspacePathResult = string | { error: string };
+
+/** Resolve an existing agent-supplied file inside one of the allowed workspace roots. */
+export function resolveExistingWorkspacePath(
+  roots: readonly string[],
+  relPath: string,
+  exists: (path: string) => boolean,
+): WorkspacePathResult {
+  if (roots.length === 0) return { error: 'No workspace folder is open.' };
+  for (const root of roots) {
+    const resolved = resolveWithinRoot(root, relPath);
+    if (resolved && exists(resolved)) return resolved;
+  }
+  if (roots.some((root) => !resolveWithinRoot(root, relPath))) {
+    return { error: `Path "${relPath}" escapes the workspace root.` };
+  }
+  return { error: `File not found: ${relPath}` };
 }
 
 /**
@@ -32,15 +51,15 @@ export function resolveWithinRoot(root: string, relPath: string): string | undef
  * itself rather than to an enclosing folder.
  */
 export function deepestAncestor<T>(items: T[], getRoot: (item: T) => string, target: string): T | undefined {
-    let best: T | undefined;
-    let bestLen = -1;
-    for (const item of items) {
-        const root = path.resolve(getRoot(item));
-        if (!isAncestor(root, target)) continue;
-        if (root.length > bestLen) {
-            best = item;
-            bestLen = root.length;
-        }
+  let best: T | undefined;
+  let bestLen = -1;
+  for (const item of items) {
+    const root = path.resolve(getRoot(item));
+    if (!isAncestor(root, target)) continue;
+    if (root.length > bestLen) {
+      best = item;
+      bestLen = root.length;
     }
-    return best;
+  }
+  return best;
 }

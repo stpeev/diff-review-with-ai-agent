@@ -10,17 +10,17 @@
 import { scopeIdForRemote, scopeIdForRepo } from './scope-id';
 
 export interface RepoStateLike {
-    remotes?: { fetchUrl?: string; pushUrl?: string }[];
-    HEAD?: { name?: string; commit?: string };
+  remotes?: { fetchUrl?: string; pushUrl?: string }[];
+  HEAD?: { name?: string; commit?: string };
 }
 
 export interface GitScope {
-    scopeId: string;
-    branchKey: string;
+  scopeId: string;
+  branchKey: string;
 }
 
 function shortSha(sha: string | undefined): string {
-    return (sha ?? 'unknown').slice(0, 8);
+  return (sha ?? 'unknown').slice(0, 8);
 }
 
 /**
@@ -36,11 +36,11 @@ function shortSha(sha: string | undefined): string {
  * absence means the refresh has not landed yet.
  */
 export function gitScopeFor(state: RepoStateLike, repoRealPath: string): GitScope | undefined {
-    if (!state.HEAD?.name && !state.HEAD?.commit) return undefined;
+  if (!state.HEAD?.name && !state.HEAD?.commit) return undefined;
 
-    const remoteUrl = state.remotes?.[0]?.fetchUrl || state.remotes?.[0]?.pushUrl;
-    return {
-        scopeId: remoteUrl ? scopeIdForRemote(remoteUrl) : scopeIdForRepo(repoRealPath),
-        branchKey: state.HEAD?.name || `_detached.${shortSha(state.HEAD?.commit)}`,
-    };
+  const remoteUrl = state.remotes?.[0]?.fetchUrl || state.remotes?.[0]?.pushUrl;
+  return {
+    scopeId: remoteUrl ? scopeIdForRemote(remoteUrl) : scopeIdForRepo(repoRealPath),
+    branchKey: state.HEAD?.name || `_detached.${shortSha(state.HEAD?.commit)}`,
+  };
 }

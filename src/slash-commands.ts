@@ -11,7 +11,7 @@
  * one thing to review. See docs/superpowers/specs/2026-09-05-agent-slash-command-design.md.
  *
  * Pure: no `vscode` import, so it is requirable under plain `node --test`.
- * See test/slash-commands.test.js.
+ * See test/slash-commands.test.ts.
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -24,37 +24,38 @@ export type CommandId = 'perform' | 'address' | 'register' | 'unregister';
 export type CommandKind = 'claude-md' | 'codex-md' | 'gemini-toml' | 'vscode-prompt';
 
 export const INVOCATION: Record<CommandId, string> = {
-    perform: '/perform-diff-review',
-    address: '/address-diff-review',
-    register: '/register-for-diff-review-send',
-    unregister: '/unregister-for-diff-review-send',
+  perform: '/perform-diff-review',
+  address: '/address-diff-review',
+  register: '/register-for-diff-review-send',
+  unregister: '/unregister-for-diff-review-send',
 };
 
 export const MARKER: Record<CommandId, string> = {
-    perform: '<!-- diff-review:perform v1 -->',
-    address: '<!-- diff-review:address v2 -->',
-    register: '<!-- diff-review:register-send v1 -->',
-    unregister: '<!-- diff-review:unregister-send v1 -->',
+  perform: '<!-- diff-review:perform v1 -->',
+  address: '<!-- diff-review:address v2 -->',
+  register: '<!-- diff-review:register-send v1 -->',
+  unregister: '<!-- diff-review:unregister-send v1 -->',
 };
 
 const DESCRIPTION: Record<CommandId, string> = {
-    perform: 'Review the current branch against its merge-base and leave inline Diff Review comments on what you find',
-    address: 'Work every open Diff Review comment thread: reply, and change code where asked',
-    register: 'Register this conversation as a target for Diff Review Send actions',
-    unregister: 'Stop routing Diff Review Send actions to this conversation',
+  perform: 'Review the current branch against its merge-base and leave inline Diff Review comments on what you find',
+  address: 'Work every open Diff Review comment thread: reply, and change code where asked',
+  register: 'Register this conversation as a target for Diff Review Send actions',
+  unregister: 'Stop routing Diff Review Send actions to this conversation',
 };
 
 const ALLOWED_TOOLS: Record<CommandId, string> = {
-    perform: 'Bash, Read, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__createDiffComment',
-    address: 'Bash, Read, Edit, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__replyToDiffComment, mcp__diff-review__resolveDiffComment',
-    register: 'mcp__diff-review__registerAgentSession',
-    unregister: 'mcp__diff-review__unregisterAgentSession',
+  perform: 'Bash, Read, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__createDiffComment',
+  address:
+    'Bash, Read, Edit, Grep, Glob, mcp__diff-review__listDiffComments, mcp__diff-review__replyToDiffComment, mcp__diff-review__resolveDiffComment',
+  register: 'mcp__diff-review__registerAgentSession',
+  unregister: 'mcp__diff-review__unregisterAgentSession',
 };
 
 // --------------- The shared instructional bodies ---------------
 
 const BODY: Record<CommandId, string> = {
-    perform: `${MARKER.perform}
+  perform: `${MARKER.perform}
 
 # Perform a diff review
 
@@ -118,7 +119,7 @@ edit, or delete what you left.
 Summarise what you did: how many threads you created and where, and what
 you reviewed but found clean.
 `,
-    address: `${MARKER.address}
+  address: `${MARKER.address}
 
 # Address diff review comments
 
@@ -139,7 +140,7 @@ reviewing. Each wait returns within 45 seconds so it stays below the configured
 60-second MCP tool timeout.
 
 ${sectionedPolicy({ tools: MCP_TOOLS, threadRef: 'listed' }, 2)}`,
-    register: `${MARKER.register}
+  register: `${MARKER.register}
 
 # Register for Diff Review Send
 
@@ -151,7 +152,7 @@ other work. Report the tool's result to the user.
 If the tool is unavailable, tell the user to run **\`Diff Review: Register MCP
 Server with a Coding Agent\`** from the command palette, then retry this command.
 `,
-    unregister: `${MARKER.unregister}
+  unregister: `${MARKER.unregister}
 
 # Unregister from Diff Review Send
 
@@ -167,15 +168,15 @@ does not terminate the conversation or remove the MCP server configuration.
 // --------------- Per-format wrapping ---------------
 
 function claudeMd(command: CommandId): string {
-    return `---\ndescription: ${DESCRIPTION[command]}\nallowed-tools: ${ALLOWED_TOOLS[command]}\n---\n\n${BODY[command]}`;
+  return `---\ndescription: ${DESCRIPTION[command]}\nallowed-tools: ${ALLOWED_TOOLS[command]}\n---\n\n${BODY[command]}`;
 }
 
 function vscodePromptMd(command: CommandId): string {
-    return `---\ndescription: ${DESCRIPTION[command]}\nmode: agent\n---\n\n${BODY[command]}`;
+  return `---\ndescription: ${DESCRIPTION[command]}\nmode: agent\n---\n\n${BODY[command]}`;
 }
 
 function codexMd(command: CommandId): string {
-    return BODY[command];
+  return BODY[command];
 }
 
 /**
@@ -186,30 +187,34 @@ function codexMd(command: CommandId): string {
  * introduces either does not silently corrupt the Gemini file.
  */
 function escapeTomlMultilineString(s: string): string {
-    return s.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
+  return s.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
 }
 
 function escapeTomlString(s: string): string {
-    return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function geminiToml(command: CommandId): string {
-    const description = escapeTomlString(DESCRIPTION[command]);
-    // BODY[command] already ends in a single newline, so no extra one is
-    // added before the closing delimiter — otherwise the Gemini file would
-    // carry a blank line the other three formats don't.
-    const body = escapeTomlMultilineString(BODY[command]);
-    return `description = "${description}"\nprompt = """\n${body}"""\n`;
+  const description = escapeTomlString(DESCRIPTION[command]);
+  // BODY[command] already ends in a single newline, so no extra one is
+  // added before the closing delimiter — otherwise the Gemini file would
+  // carry a blank line the other three formats don't.
+  const body = escapeTomlMultilineString(BODY[command]);
+  return `description = "${description}"\nprompt = """\n${body}"""\n`;
 }
 
 /** The full file content for one command in one wrapper format. */
 export function renderBody(kind: CommandKind, command: CommandId): string {
-    switch (kind) {
-        case 'claude-md': return claudeMd(command);
-        case 'vscode-prompt': return vscodePromptMd(command);
-        case 'codex-md': return codexMd(command);
-        case 'gemini-toml': return geminiToml(command);
-    }
+  switch (kind) {
+    case 'claude-md':
+      return claudeMd(command);
+    case 'vscode-prompt':
+      return vscodePromptMd(command);
+    case 'codex-md':
+      return codexMd(command);
+    case 'gemini-toml':
+      return geminiToml(command);
+  }
 }
 
 // --------------- Discovery and status ---------------
@@ -217,73 +222,78 @@ export function renderBody(kind: CommandKind, command: CommandId): string {
 export type Status = 'current' | 'stale' | 'missing';
 
 export interface CommandFile {
-    command: CommandId;
-    filePath: string;
-    invocation: string;
-    status: Status;
-    /** True when we can safely write this file; false ⇒ copy-only. */
-    writable: boolean;
-    /** Why `writable` is false, shown in the UI. */
-    reason?: string;
+  command: CommandId;
+  filePath: string;
+  invocation: string;
+  status: Status;
+  /** True when we can safely write this file; false ⇒ copy-only. */
+  writable: boolean;
+  /** Why `writable` is false, shown in the UI. */
+  reason?: string;
 }
 
 export interface SlashCommandTarget {
-    id: string;
-    label: string;
-    kind: CommandKind;
-    dirPath: string;
-    /** Always all four, in perform → address → register → unregister order. */
-    files: CommandFile[];
-    /** Worst status: any `missing` ⇒ missing, else any `stale` ⇒ stale. */
-    status: Status;
-    /** True when at least one file can be written. */
-    writable: boolean;
+  id: string;
+  label: string;
+  kind: CommandKind;
+  dirPath: string;
+  /** Always all four, in perform → address → register → unregister order. */
+  files: CommandFile[];
+  /** Worst status: any `missing` ⇒ missing, else any `stale` ⇒ stale. */
+  status: Status;
+  /** True when at least one file can be written. */
+  writable: boolean;
 }
 
 const EXT: Record<CommandKind, string> = {
-    'claude-md': 'md',
-    'codex-md': 'md',
-    'gemini-toml': 'toml',
-    'vscode-prompt': 'prompt.md',
+  'claude-md': 'md',
+  'codex-md': 'md',
+  'gemini-toml': 'toml',
+  'vscode-prompt': 'prompt.md',
 };
 
 function fileName(command: CommandId, kind: CommandKind): string {
-    const base = command === 'register'
-        ? 'register-for-diff-review-send'
-        : command === 'unregister' ? 'unregister-for-diff-review-send' : `${command}-diff-review`;
-    return `${base}.${EXT[kind]}`;
+  const base =
+    command === 'register'
+      ? 'register-for-diff-review-send'
+      : command === 'unregister'
+        ? 'unregister-for-diff-review-send'
+        : `${command}-diff-review`;
+  return `${base}.${EXT[kind]}`;
 }
 
 function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): CommandFile {
-    const filePath = path.join(dirPath, fileName(command, kind));
-    const text = readText(filePath);
-    const expected = renderBody(kind, command);
-    const base = { command, filePath, invocation: INVOCATION[command] };
+  const filePath = path.join(dirPath, fileName(command, kind));
+  const text = readText(filePath);
+  const expected = renderBody(kind, command);
+  const base = { command, filePath, invocation: INVOCATION[command] };
 
-    if (text === null) return { ...base, status: 'missing', writable: true };
-    if (text === expected) return { ...base, status: 'current', writable: true };
+  if (text === null) return { ...base, status: 'missing', writable: true };
+  if (text === expected) return { ...base, status: 'current', writable: true };
 
-    const hasMarker = text.includes(MARKER[command]);
-    return hasMarker
-        ? { ...base, status: 'stale', writable: true }
-        : { ...base, status: 'stale', writable: false, reason: 'file not written by Diff Review' };
+  const hasMarker = text.includes(MARKER[command]);
+  return hasMarker
+    ? { ...base, status: 'stale', writable: true }
+    : { ...base, status: 'stale', writable: false, reason: 'file not written by Diff Review' };
 }
 
 const STATUS_RANK: Record<Status, number> = { missing: 2, stale: 1, current: 0 };
 
 function buildTarget(id: string, label: string, kind: CommandKind, dirPath: string): SlashCommandTarget {
-    const files = (['perform', 'address', 'register', 'unregister'] as CommandId[]).map(command => inspectFile(dirPath, command, kind));
-    const status = files.reduce<Status>(
-        (worst, f) => (STATUS_RANK[f.status] > STATUS_RANK[worst] ? f.status : worst),
-        'current',
-    );
-    return { id, label, kind, dirPath, files, status, writable: files.some(f => f.writable) };
+  const files = (['perform', 'address', 'register', 'unregister'] as CommandId[]).map((command) =>
+    inspectFile(dirPath, command, kind),
+  );
+  const status = files.reduce<Status>(
+    (worst, f) => (STATUS_RANK[f.status] > STATUS_RANK[worst] ? f.status : worst),
+    'current',
+  );
+  return { id, label, kind, dirPath, files, status, writable: files.some((f) => f.writable) };
 }
 
 export interface DiscoveryEnv {
-    home?: string;
-    platform?: NodeJS.Platform;
-    codexHome?: string;
+  home?: string;
+  platform?: NodeJS.Platform;
+  codexHome?: string;
 }
 
 /**
@@ -301,66 +311,68 @@ export interface DiscoveryEnv {
  * Discovery itself stays read-only: it never creates a directory it reports.
  */
 export function discoverSlashCommands(env: DiscoveryEnv = {}): SlashCommandTarget[] {
-    const home = env.home ?? os.homedir();
-    const platform = env.platform ?? process.platform;
-    const targets: SlashCommandTarget[] = [];
+  const home = env.home ?? os.homedir();
+  const platform = env.platform ?? process.platform;
+  const targets: SlashCommandTarget[] = [];
 
-    const claudeHome = path.join(home, '.claude');
-    if (fs.existsSync(claudeHome)) {
-        targets.push(buildTarget('claude', 'Claude Code', 'claude-md', path.join(claudeHome, 'commands')));
+  const claudeHome = path.join(home, '.claude');
+  if (fs.existsSync(claudeHome)) {
+    targets.push(buildTarget('claude', 'Claude Code', 'claude-md', path.join(claudeHome, 'commands')));
+  }
+
+  const codexHome = env.codexHome ?? process.env.CODEX_HOME ?? path.join(home, '.codex');
+  if (fs.existsSync(codexHome)) {
+    targets.push(buildTarget('codex', 'Codex CLI', 'codex-md', path.join(codexHome, 'prompts')));
+  }
+
+  const geminiHome = path.join(home, '.gemini');
+  if (fs.existsSync(geminiHome)) {
+    targets.push(buildTarget('gemini', 'Gemini CLI', 'gemini-toml', path.join(geminiHome, 'commands')));
+  }
+
+  const vscodeIds = new Set(['vscode', 'vscode-insiders', 'vscodium']);
+  for (const app of VSCODE_APPS.filter((a) => vscodeIds.has(a.id))) {
+    const root = userDataRoot(app, home, platform);
+    if (fs.existsSync(root)) {
+      targets.push(buildTarget(app.id, app.label, 'vscode-prompt', path.join(root, 'prompts')));
     }
 
-    const codexHome = env.codexHome ?? process.env.CODEX_HOME ?? path.join(home, '.codex');
-    if (fs.existsSync(codexHome)) {
-        targets.push(buildTarget('codex', 'Codex CLI', 'codex-md', path.join(codexHome, 'prompts')));
+    const profiles = parseProfiles(readText(path.join(root, 'globalStorage', 'storage.json')));
+    for (const profile of profiles) {
+      const profileDir = path.join(root, 'profiles', profile.location);
+      if (!fs.existsSync(profileDir)) continue;
+      targets.push(
+        buildTarget(
+          `${app.id}:profile:${profile.location}`,
+          `${app.label} — profile "${profile.name}"`,
+          'vscode-prompt',
+          path.join(profileDir, 'prompts'),
+        ),
+      );
     }
+  }
 
-    const geminiHome = path.join(home, '.gemini');
-    if (fs.existsSync(geminiHome)) {
-        targets.push(buildTarget('gemini', 'Gemini CLI', 'gemini-toml', path.join(geminiHome, 'commands')));
-    }
-
-    const vscodeIds = new Set(['vscode', 'vscode-insiders', 'vscodium']);
-    for (const app of VSCODE_APPS.filter(a => vscodeIds.has(a.id))) {
-        const root = userDataRoot(app, home, platform);
-        if (fs.existsSync(root)) {
-            targets.push(buildTarget(app.id, app.label, 'vscode-prompt', path.join(root, 'prompts')));
-        }
-
-        const profiles = parseProfiles(readText(path.join(root, 'globalStorage', 'storage.json')));
-        for (const profile of profiles) {
-            const profileDir = path.join(root, 'profiles', profile.location);
-            if (!fs.existsSync(profileDir)) continue;
-            targets.push(buildTarget(
-                `${app.id}:profile:${profile.location}`,
-                `${app.label} — profile "${profile.name}"`,
-                'vscode-prompt',
-                path.join(profileDir, 'prompts'),
-            ));
-        }
-    }
-
-    return targets;
+  return targets;
 }
 
 // --------------- Clipboard rendering and writers ---------------
 
 /** What lands on the clipboard: the body, plus where to save it. */
 export function renderClipboard(target: SlashCommandTarget, command: CommandId): string {
-    const file = target.files.find(f => f.command === command)!;
-    return `${renderBody(target.kind, command)}\n---\nSave this to: ${file.filePath}\n`;
+  const file = target.files.find((f) => f.command === command)!;
+  return `${renderBody(target.kind, command)}\n---\nSave this to: ${file.filePath}\n`;
 }
 
 export interface SlashWriteResult {
-    command: CommandId;
-    filePath: string;
-    /** The backup taken before overwriting a stale file, when there was one. */
-    backup?: string;
+  command: CommandId;
+  filePath: string;
+  /** The backup taken before overwriting a stale file, when there was one. */
+  backup?: string;
 }
 
 export interface InstallOutcome {
-    written: SlashWriteResult[];
-    errors: { command: CommandId; filePath: string; message: string }[];
+  written: SlashWriteResult[];
+  errors: { command: CommandId; filePath: string; message: string }[];
 }
 
 /**
@@ -369,25 +381,25 @@ export interface InstallOutcome {
  * successes and failures are both reported so the caller can show each.
  */
 export function install(target: SlashCommandTarget): InstallOutcome {
-    const written: SlashWriteResult[] = [];
-    const errors: InstallOutcome['errors'] = [];
+  const written: SlashWriteResult[] = [];
+  const errors: InstallOutcome['errors'] = [];
 
-    for (const file of target.files) {
-        if (!file.writable || file.status === 'current') continue;
-        try {
-            const savedBackup = backup(file.filePath);
-            fs.mkdirSync(path.dirname(file.filePath), { recursive: true });
-            fs.writeFileSync(file.filePath, renderBody(target.kind, file.command), 'utf-8');
-            written.push({ command: file.command, filePath: file.filePath, backup: savedBackup });
-        } catch (e: any) {
-            errors.push({ command: file.command, filePath: file.filePath, message: e.message });
-        }
+  for (const file of target.files) {
+    if (!file.writable || file.status === 'current') continue;
+    try {
+      const savedBackup = backup(file.filePath);
+      fs.mkdirSync(path.dirname(file.filePath), { recursive: true });
+      fs.writeFileSync(file.filePath, renderBody(target.kind, file.command), 'utf-8');
+      written.push({ command: file.command, filePath: file.filePath, backup: savedBackup });
+    } catch (e: any) {
+      errors.push({ command: file.command, filePath: file.filePath, message: e.message });
     }
+  }
 
-    return { written, errors };
+  return { written, errors };
 }
 
-// Exported for test/slash-commands.test.js only — not part of the module's
+// Exported for test/slash-commands.test.ts only — not part of the module's
 // real surface, but the escaping logic is worth a direct unit test since the
 // authored bodies never exercise the case it guards against.
 export const __escapeTomlMultilineStringForTest = escapeTomlMultilineString;

@@ -22,11 +22,11 @@ import { createRequire } from 'module';
 import { resolveServer } from './mcp-resolve';
 
 try {
-    // The path is only known at runtime, so this has to be a real require
-    // rather than an import the bundler would try to follow.
-    createRequire(__filename)(resolveServer().path);
+  // The path is only known at runtime, so this has to be a real require
+  // rather than an import the bundler would try to follow.
+  createRequire(__filename)(resolveServer().path);
 } catch (err: any) {
-    // stdout is the MCP transport, so diagnostics must go to stderr.
-    process.stderr.write(`[diff-review] ${err.message}\n`);
-    process.exit(1);
+  // stdout is the MCP transport, so diagnostics must go to stderr.
+  process.stderr.write(`[diff-review] ${err.message}\n`);
+  process.exit(1);
 }

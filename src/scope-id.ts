@@ -11,7 +11,7 @@ import * as crypto from 'crypto';
 import { deepestAncestor } from './path-util';
 
 function sha256(s: string): string {
-    return crypto.createHash('sha256').update(s).digest('hex');
+  return crypto.createHash('sha256').update(s).digest('hex');
 }
 
 /**
@@ -22,52 +22,55 @@ function sha256(s: string): string {
  * this needs to make.
  */
 export function normalizeRemoteUrl(url: string): string {
-    let u = url.trim();
+  let u = url.trim();
 
-    // scp-like ssh form: git@host:owner/repo(.git) -> ssh://host/owner/repo
-    const scp = u.match(/^([\w.-]+)@([\w.-]+):(.+)$/);
-    if (scp && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) {
-        u = `ssh://${scp[2]}/${scp[3]}`;
-    }
+  // scp-like ssh form: git@host:owner/repo(.git) -> ssh://host/owner/repo
+  const scp = u.match(/^([\w.-]+)@([\w.-]+):(.+)$/);
+  if (scp && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) {
+    u = `ssh://${scp[2]}/${scp[3]}`;
+  }
 
-    u = u.replace(/\.git\/?$/i, '').replace(/\/+$/, '');
+  u = u.replace(/\.git\/?$/i, '').replace(/\/+$/, '');
 
-    try {
-        const parsed = new URL(u);
-        parsed.username = '';
-        parsed.password = '';
-        return `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname}`;
-    } catch {
-        // Not a URL esbuild's URL() can parse (e.g. a bare local path) — fall
-        // back to a lower-cased, trimmed string rather than throwing.
-        return u.toLowerCase();
-    }
+  try {
+    const parsed = new URL(u);
+    parsed.username = '';
+    parsed.password = '';
+    return `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname}`;
+  } catch {
+    // Not a URL esbuild's URL() can parse (e.g. a bare local path) — fall
+    // back to a lower-cased, trimmed string rather than throwing.
+    return u.toLowerCase();
+  }
 }
 
 export function scopeIdForRemote(remoteUrl: string): string {
-    return `remote:${normalizeRemoteUrl(remoteUrl)}`;
+  return `remote:${normalizeRemoteUrl(remoteUrl)}`;
 }
 
 export function scopeIdForRepo(realRepoRoot: string): string {
-    return `repo:${sha256(realRepoRoot).slice(0, 32)}`;
+  return `repo:${sha256(realRepoRoot).slice(0, 32)}`;
 }
 
 export function scopeIdForFolder(realFolderPath: string): string {
-    return `folder:${sha256(realFolderPath).slice(0, 32)}`;
+  return `folder:${sha256(realFolderPath).slice(0, 32)}`;
 }
 
 /** Filesystem-safe directory name for a scope id (":" and "/" are not valid on every platform). */
 export function scopeDirName(scopeId: string): string {
-    return scopeId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  return scopeId.replace(/[^a-zA-Z0-9_.-]/g, '_');
 }
 
 export interface ScopeCandidate {
-    scopeId: string;
-    /** The workspace folder (realpath) this candidate was resolved for. */
-    folderRealPath: string;
+  scopeId: string;
+  /** The workspace folder (realpath) this candidate was resolved for. */
+  folderRealPath: string;
 }
 
 /** The candidate whose folder is the deepest ancestor of `filePath` — resolves multi-root and mixed git/non-git workspaces. */
-export function deepestScopeForFile(candidates: ScopeCandidate[], filePath: string): ScopeCandidate | undefined {
-    return deepestAncestor(candidates, c => c.folderRealPath, filePath);
+export function deepestScopeForFile<Candidate extends ScopeCandidate>(
+  candidates: Candidate[],
+  filePath: string,
+): Candidate | undefined {
+  return deepestAncestor(candidates, (c) => c.folderRealPath, filePath);
 }
