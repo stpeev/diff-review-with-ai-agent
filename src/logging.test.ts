@@ -1,10 +1,14 @@
 import { expect, test, vi } from 'vitest';
-import { createPrefixedLogger } from './logging';
+import { createLogger } from './logging';
 
-test('createPrefixedLogger adds the product prefix once at the logging boundary', () => {
+test('createLogger formats the timestamp and product prefix at the logging boundary', () => {
   const write = vi.fn();
 
-  createPrefixedLogger(write, 'Diff Review')('Comment created');
+  createLogger({
+    write,
+    prefix: 'Diff Review',
+    now: () => new Date('2026-09-15T20:00:00.000Z'),
+  })('Comment created');
 
-  expect(write).toHaveBeenCalledWith('[Diff Review] Comment created');
+  expect(write).toHaveBeenCalledWith('[2026-09-15T20:00:00.000Z] [Diff Review] Comment created');
 });
