@@ -57,7 +57,7 @@ test('create LM tool resolves a workspace path and converts external lines once'
 
   expect(createComment).toHaveBeenCalledWith({ path: '/workspace/src/example.ts' }, 6, 7, 'Review this.');
   expect(text(result)).toBe('Created comment thread #7 at src/example.ts:7.');
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #7 created via LM tool at src/example.ts:7');
+  expect(log).toHaveBeenCalledWith('Comment #7 created via LM tool at src/example.ts:7');
 });
 
 test('list LM tool renders review data from plain entry DTOs', async () => {

@@ -53,7 +53,7 @@ class CreateCommentTool implements vscode.LanguageModelTool<CreateCommentParams>
     if (typeof resolved !== 'string') return response(resolved.error);
     const result = this.deps.createComment(vscode.Uri.file(resolved), line - 1, (endLine ?? line) - 1, text);
     if ('error' in result) return response(result.error);
-    this.deps.log(`[Diff Review] Comment #${result.threadId} created via LM tool at ${path}:${line}`);
+    this.deps.log(`Comment #${result.threadId} created via LM tool at ${path}:${line}`);
     return response(`Created comment thread #${result.threadId} at ${path}:${line}.`);
   }
 }
@@ -66,9 +66,7 @@ class ListCommentsTool implements vscode.LanguageModelTool<Record<string, never>
     _token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelToolResult> {
     const entries = [...this.deps.listEntries()];
-    this.deps.log(
-      `[Diff Review] Comments listed via LM tool (${entries.length} comment(s), ${this.deps.driftedCount()} drifted)`,
-    );
+    this.deps.log(`Comments listed via LM tool (${entries.length} comment(s), ${this.deps.driftedCount()} drifted)`);
     if (entries.length === 0) return response('No review comments.');
     return response(renderLanguageModelReviewList(entries));
   }

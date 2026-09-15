@@ -49,7 +49,7 @@ class ReplyToCommentTool<Thread> implements vscode.LanguageModelTool<ReplyParams
     const thread = this.deps.getThread(threadId);
     if (!thread) return response(`Thread #${threadId} not found.`);
     this.deps.log(
-      `[Diff Review] Comment #${threadId} updated (agent reply via LM tool${result.drifted ? ', drifted' : ''}) at ${this.deps.relativePath(this.deps.uri(thread))}:${this.deps.startLine(thread) + 1}`,
+      `Comment #${threadId} updated (agent reply via LM tool${result.drifted ? ', drifted' : ''}) at ${this.deps.relativePath(this.deps.uri(thread))}:${this.deps.startLine(thread) + 1}`,
     );
     return response(
       result.drifted
@@ -72,7 +72,7 @@ class ResolveCommentTool<Thread> implements vscode.LanguageModelTool<ThreadHandl
     const thread = this.deps.getThread(threadId);
     if (!thread) return response(`Thread #${threadId} not found.`);
     this.deps.log(
-      `[Diff Review] Comment #${threadId} updated (resolved via LM tool${result.drifted ? ', drifted' : ''}) at ${this.deps.relativePath(this.deps.uri(thread))}`,
+      `Comment #${threadId} updated (resolved via LM tool${result.drifted ? ', drifted' : ''}) at ${this.deps.relativePath(this.deps.uri(thread))}`,
     );
     return response(`Comment #${threadId} resolved.`);
   }
@@ -91,7 +91,7 @@ class DeleteCommentTool<Thread> implements vscode.LanguageModelTool<ThreadHandle
     if (result.ok === false || !thread)
       return response(result.ok === false ? result.message : `Thread #${threadId} not found.`);
     this.deps.log(
-      `[Diff Review] Comment #${threadId} deleted via LM tool${result.drifted ? ' (drifted)' : ''} at ${this.deps.relativePath(this.deps.uri(thread))}`,
+      `Comment #${threadId} deleted via LM tool${result.drifted ? ' (drifted)' : ''} at ${this.deps.relativePath(this.deps.uri(thread))}`,
     );
     return response(`Comment #${threadId} deleted.`);
   }

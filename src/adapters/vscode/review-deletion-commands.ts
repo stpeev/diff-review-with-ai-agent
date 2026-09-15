@@ -34,9 +34,9 @@ export function registerReviewDeletionCommands<Thread extends vscode.CommentThre
       if (result.ok === false) return;
       const path = deps.relativePath(thread.uri);
       if (result.threadDeleted) {
-        deps.log(`[Diff Review] Comment #${threadId} deleted (last comment, thread removed) at ${path}`);
+        deps.log(`Comment #${threadId} deleted (last comment, thread removed) at ${path}`);
       } else {
-        deps.log(`[Diff Review] Comment #${comment.id} deleted from thread #${threadId} at ${path}`);
+        deps.log(`Comment #${comment.id} deleted from thread #${threadId} at ${path}`);
       }
     }),
   );
@@ -47,7 +47,7 @@ export function registerReviewDeletionCommands<Thread extends vscode.CommentThre
       const threadId = deps.publicId(thread);
       if (threadId === undefined || deps.reviewService.delete(threadId).ok === false) return;
       deps.log(
-        `[Diff Review] Comment #${threadId} deleted (whole thread, ${commentCount} comment(s)) at ${deps.relativePath(thread.uri)}`,
+        `Comment #${threadId} deleted (whole thread, ${commentCount} comment(s)) at ${deps.relativePath(thread.uri)}`,
       );
       deps.refresh();
       deps.queueSave(thread.uri);

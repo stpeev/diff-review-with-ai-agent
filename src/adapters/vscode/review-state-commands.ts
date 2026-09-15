@@ -24,14 +24,14 @@ export function registerReviewStateCommands<Thread extends vscode.CommentThread>
     deps.registerCommand('diffReview.resolve', (thread) => {
       const id = deps.publicId(thread);
       if (id === undefined || deps.reviewService.resolve(id).ok === false) return;
-      deps.log(`[Diff Review] Comment #${id} updated (resolved) at ${deps.relativePath(thread.uri)}`);
+      deps.log(`Comment #${id} updated (resolved) at ${deps.relativePath(thread.uri)}`);
     }),
   );
   subscriptions.push(
     deps.registerCommand('diffReview.unresolve', (thread) => {
       const id = deps.publicId(thread);
       if (id === undefined || deps.reviewService.unresolve(id).ok === false) return;
-      deps.log(`[Diff Review] Comment #${id} updated (unresolved) at ${deps.relativePath(thread.uri)}`);
+      deps.log(`Comment #${id} updated (unresolved) at ${deps.relativePath(thread.uri)}`);
     }),
   );
 }

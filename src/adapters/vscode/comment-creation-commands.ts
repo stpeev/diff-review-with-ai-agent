@@ -23,7 +23,7 @@ export function registerCommentCreationCommands<Thread extends vscode.CommentThr
       const created = deps.reviewService.create(thread, reply.text, 'user');
       if (created.ok === false) return;
       deps.log(
-        `[Diff Review] Comment #${created.threadId} created at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
+        `Comment #${created.threadId} created at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
       );
     }),
   );
@@ -33,7 +33,7 @@ export function registerCommentCreationCommands<Thread extends vscode.CommentThr
       const threadId = deps.publicId(thread);
       if (threadId === undefined || deps.reviewService.replyFromUser(threadId, reply.text).ok === false) return;
       deps.log(
-        `[Diff Review] Comment #${threadId} updated (reply added) at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
+        `Comment #${threadId} updated (reply added) at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
       );
     }),
   );

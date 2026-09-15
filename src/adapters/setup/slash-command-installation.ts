@@ -51,7 +51,7 @@ export async function installAgentSlashCommands(
   }
   if (outcome.errors.length) {
     deps.log(
-      `[Diff Review] installSlashCommands failed for ${target.id}: ${outcome.errors.map((error) => error.message).join('; ')}`,
+      `installSlashCommands failed for ${target.id}: ${outcome.errors.map((error) => error.message).join('; ')}`,
     );
     await deps.warning(
       `Diff Review: could not write ${outcome.errors.map((error) => deps.homeShort(error.filePath)).join(', ')} (${outcome.errors.map((error) => error.message).join('; ')}). Copying those to the clipboard instead.`,
