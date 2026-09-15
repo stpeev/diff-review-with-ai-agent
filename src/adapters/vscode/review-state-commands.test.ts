@@ -38,7 +38,7 @@ test('resolve command delegates a known public thread handle to the review servi
   handlers.get('diffReview.resolve')!(thread as FakeCommentThread);
 
   expect(resolve).toHaveBeenCalledWith(42);
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #42 updated (resolved) at src/example.ts');
+  expect(log).toHaveBeenCalledWith('Comment #42 updated (resolved) at src/example.ts');
   expect(subscriptions).toHaveLength(2);
 });
 
@@ -49,7 +49,7 @@ test('unresolve command delegates a known public thread handle to the review ser
   handlers.get('diffReview.unresolve')!(thread as FakeCommentThread);
 
   expect(unresolve).toHaveBeenCalledWith(42);
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #42 updated (unresolved) at src/example.ts');
+  expect(log).toHaveBeenCalledWith('Comment #42 updated (unresolved) at src/example.ts');
 });
 
 test('state commands ignore a view with no public thread handle', () => {

@@ -50,7 +50,7 @@ test('delete note delegates its comment and public thread IDs to the service', (
   handlers.get('diffReview.deleteNote')!({ id: 9 } as never);
 
   expect(deleteComment).toHaveBeenCalledWith(42, 9);
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #9 deleted from thread #42 at src/example.ts');
+  expect(log).toHaveBeenCalledWith('Comment #9 deleted from thread #42 at src/example.ts');
 });
 
 test('delete note reports removal of a thread when its last comment is deleted', () => {
@@ -59,9 +59,7 @@ test('delete note reports removal of a thread when its last comment is deleted',
 
   handlers.get('diffReview.deleteNote')!({ id: 9 } as never);
 
-  expect(log).toHaveBeenCalledWith(
-    '[Diff Review] Comment #42 deleted (last comment, thread removed) at src/example.ts',
-  );
+  expect(log).toHaveBeenCalledWith('Comment #42 deleted (last comment, thread removed) at src/example.ts');
 });
 
 test('delete thread confirms multiple comments before deleting and scheduling the view update', async () => {
@@ -71,7 +69,7 @@ test('delete thread confirms multiple comments before deleting and scheduling th
 
   expect(confirmThreadDeletion).toHaveBeenCalledWith(2);
   expect(deleteThread).toHaveBeenCalledWith(42);
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #42 deleted (whole thread, 2 comment(s)) at src/example.ts');
+  expect(log).toHaveBeenCalledWith('Comment #42 deleted (whole thread, 2 comment(s)) at src/example.ts');
   expect(refresh).toHaveBeenCalledOnce();
   expect(queueSave).toHaveBeenCalledWith(thread.uri);
 });

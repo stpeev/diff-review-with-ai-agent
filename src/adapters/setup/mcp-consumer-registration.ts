@@ -58,7 +58,7 @@ export async function registerMcpConsumer(target: McpConsumerTarget, deps: McpCo
     if (picked === action) deps.installAgentCommands();
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
-    deps.log(`[Diff Review] register failed for ${target.id}: ${detail}`);
+    deps.log(`register failed for ${target.id}: ${detail}`);
     await copyConsumerSnippet(target, deps);
     await deps.warning(
       `Diff Review: could not write ${deps.homeShort(target.configPath)} (${detail}). The config is on your clipboard instead.`,

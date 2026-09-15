@@ -57,7 +57,7 @@ test('save edit logs only after the service accepts the mutation', () => {
   handlers.get('diffReview.saveEdit')!(comment);
 
   expect(saveEditedComment).toHaveBeenCalledWith(42, 9);
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #9 updated (edit saved) at src/example.ts:7');
+  expect(log).toHaveBeenCalledWith('Comment #9 updated (edit saved) at src/example.ts:7');
 });
 
 test('edit commands ignore comments no longer associated with a thread', () => {

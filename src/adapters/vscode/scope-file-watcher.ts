@@ -27,14 +27,14 @@ export function watchScopeFile<File>(deps: ScopeFileWatcherDeps<File>): ScopeFil
   const reload = () => {
     const suppressUntil = deps.suppressWatcherUntil();
     if (suppressUntil !== undefined && deps.now() < suppressUntil) return;
-    deps.log(`[Diff Review] ${deps.folderPath}: external change to ${deps.filePath}, reloading`);
+    deps.log(`${deps.folderPath}: external change to ${deps.filePath}, reloading`);
     try {
       const file = deps.read();
       deps.replaceVisibleThreads(file);
       deps.refresh();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      deps.log(`[Diff Review] Ignored unreadable external comments update for ${deps.folderPath}: ${detail}`);
+      deps.log(`Ignored unreadable external comments update for ${deps.folderPath}: ${detail}`);
       deps.showError(
         `Diff Review: could not reload comments for ${deps.folderName}. Existing comments remain visible.`,
       );

@@ -36,7 +36,7 @@ export function registerCommentEditCommands<Thread extends vscode.CommentThread>
       const threadId = deps.publicId(thread);
       if (threadId === undefined || deps.reviewService.saveEditedComment(threadId, comment.id).ok === false) return;
       deps.log(
-        `[Diff Review] Comment #${comment.id} updated (edit saved) at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
+        `Comment #${comment.id} updated (edit saved) at ${deps.relativePath(thread.uri)}:${deps.startLine(thread) + 1}`,
       );
     }),
   );

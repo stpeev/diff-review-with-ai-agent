@@ -38,7 +38,7 @@ test('create command delegates a new user comment to the review service', () => 
   handlers.get('diffReview.createNote')!({ thread, text: 'Please simplify this.' } as vscode.CommentReply);
 
   expect(create).toHaveBeenCalledWith(thread, 'Please simplify this.', 'user');
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #99 created at src/example.ts:7');
+  expect(log).toHaveBeenCalledWith('Comment #99 created at src/example.ts:7');
 });
 
 test('reply command delegates using the public thread handle', () => {
@@ -48,7 +48,7 @@ test('reply command delegates using the public thread handle', () => {
   handlers.get('diffReview.reply')!({ thread, text: 'Addressed.' } as vscode.CommentReply);
 
   expect(replyFromUser).toHaveBeenCalledWith(42, 'Addressed.');
-  expect(log).toHaveBeenCalledWith('[Diff Review] Comment #42 updated (reply added) at src/example.ts:7');
+  expect(log).toHaveBeenCalledWith('Comment #42 updated (reply added) at src/example.ts:7');
 });
 
 test('reply command ignores a thread without a public handle', () => {
