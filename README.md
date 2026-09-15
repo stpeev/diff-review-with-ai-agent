@@ -290,7 +290,7 @@ run directly from TypeScript source through Vitest.
 The extension requires VS Code 1.95 or later because it uses the finalized
 Language Model Tool API.
 
-Use Node 18 or later for development and for the bundled MCP server and
+Use Node 24 or later for development and for the bundled MCP server and
 launcher runtime.
 
 ```bash

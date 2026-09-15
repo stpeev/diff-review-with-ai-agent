@@ -7,7 +7,8 @@ Status: implemented incrementally. Originally based on repository commit `52a1ac
 The repository now uses Vite library builds for the extension, MCP server, and
 standalone launcher; Vitest runs TypeScript tests directly from source; and
 TypeScript, formatting, ESLint boundaries, coverage, integration, package, and
-extension-host commands are part of the documented workflow. Review mutations
+extension-host commands are part of the documented workflow. Node 24 is the
+minimum development, packaging, MCP, and launcher runtime. Review mutations
 are delegated through `ReviewService`, persisted identities and locations are
 explicit, workspace transitions and saves are serialized, and scope storage is
 validated, migrated, locked, and exercised by real multi-process tests.
@@ -139,7 +140,7 @@ Build requirements:
 - Externalize Node built-ins and externalize `vscode` for the extension. Bundle required npm runtime dependencies because VSIX packaging uses `--no-dependencies`.
 - Preserve the effective `jsonc-parser` module-resolution behavior called out in the existing configuration. Verify the packaged registration path without repository `node_modules` available.
 - Clean generated output once before production builds; individual builds must not erase other outputs. Stop TypeScript from emitting competing files into `out/`.
-- Pin a compatible stable Vite/Vitest/tooling set and document the development Node version. Build-tool Node requirements and shipped runtime compatibility are separate decisions. Preserve the current Node 18 MCP/launcher target initially; verify dependencies under that runtime or explicitly revise the support policy. A syntax target alone is not compatibility proof.
+- Pin a compatible stable Vite/Vitest/tooling set and document the development Node version. Build-tool Node requirements and shipped runtime compatibility are separate decisions. Node 24 is the supported MCP/launcher runtime; verify dependencies under that runtime. A syntax target alone is not compatibility proof.
 - Pin `@vscode/vsce` locally. Packaging must build from source through an explicit prerequisite or `vscode:prepublish`, fail on errors, and exclude tests, fixtures, and development output. Update debug, sandbox, and deployment scripts together.
 
 Developer command contract:
