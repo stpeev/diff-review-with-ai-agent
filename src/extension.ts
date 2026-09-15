@@ -30,7 +30,7 @@ import { deliverToSession } from './agent-deliver';
 import { deliverReviewOrFallback } from './agents/review-delivery';
 import { verifyClaudeSessionIdentity } from './agent-session-verification';
 import { ReviewService } from './review/service';
-import { createPrefixedLogger } from './logging';
+import { createLogger } from './logging';
 import { ScopeRepository } from './storage/repository';
 import { SaveQueue } from './storage/save-queue';
 import { commitBranchState } from './storage/branch-commit';
@@ -319,11 +319,11 @@ let extensionContext: vscode.ExtensionContext;
 let activeController: vscode.CommentController | undefined;
 let outputLog: vscode.OutputChannel;
 
-/** Every output-channel line goes through here, so each carries a UTC timestamp. */
-const log = createPrefixedLogger(
-  (message) => outputLog.appendLine(`[${new Date().toISOString()}] ${message}`),
-  'Diff Review',
-);
+/** Every output-channel line goes through this logger. */
+const log = createLogger({
+  write: (line) => outputLog.appendLine(line),
+  prefix: 'Diff Review',
+});
 
 function refresh() {
   const n = threadIndex.size;
