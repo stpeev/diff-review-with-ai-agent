@@ -127,15 +127,19 @@ Agent: [calls #listDiffComments] → sees 3 open comments
 ### MCP Server (Claude Code, Cursor, Windsurf, etc.)
 The extension includes a standalone MCP server that any MCP-compatible AI client can connect to for real-time access to review comments. Available tools: `listDiffComments`, `awaitReview`, `createDiffComment`, `replyToDiffComment`, `resolveDiffComment`, `deleteDiffComment`, `registerAgentSession`, and `unregisterAgentSession`.
 
-**The quick way:** run **`Diff Review: Register MCP Server with a Coding Agent`** from the command palette. It lists every MCP consumer it can find on your machine — VS Code and its forks (including per-profile configs), Codex CLI, Claude Code — and shows whether `diff-review` is registered with each:
+**The quick way:** run **`Diff Review: Setup`** from the command palette. It finds everything on your machine Diff Review can talk to — VS Code and its forks (including per-profile configs), Cursor, Codex CLI, Claude Code, Gemini CLI — and shows, for each, whether the MCP server is registered and whether the agent commands are installed:
 
 | | meaning |
 |---|---|
 | `$(check)` registered | already points at the launcher, nothing to do |
-| `$(warning)` registered — runs … | registered, but against a path that breaks on upgrade; pick it to repair |
-| `$(circle-outline)` not registered | pick it to add |
+| `$(warning)` registered — runs … | registered, but against a path that breaks on upgrade; tick it to repair |
+| `$(circle-outline)` not registered | tick it to add |
 
-Picking a consumer shows exactly what will be written and where, and backs the file up before changing it. Every row also offers **Copy** instead, if you would rather paste the config or run the `mcp add` command yourself — and rows we cannot edit safely are copy-only automatically.
+Nothing is preselected: tick exactly the places you want set up and press Enter.
+Setup registers the MCP server **and** installs all four agent commands for
+each ticked row in one go, backing any file up before it changes it. Configs
+that cannot be edited safely are copied to the clipboard instead, so you can
+paste them in by hand.
 
 The rest of this section is the manual equivalent.
 
@@ -214,11 +218,10 @@ In order of preference:
 
 ### Agent Slash Commands
 
-Once the MCP server is registered, run **`Diff Review: Install the Diff
-Review Agent Commands`** from the command palette to install four slash
-commands into any agent that reads commands from its own directory
-— Claude Code, Codex CLI, Gemini CLI, and VS Code's own Copilot Chat (per
-profile):
+**`Diff Review: Setup`** installs the four slash commands alongside the MCP
+registration — tick the agent in the setup list and the commands land in any
+agent that reads commands from its own directory — Claude Code, Codex CLI,
+Gemini CLI, and VS Code's own Copilot Chat (per profile):
 
 - **`/perform-diff-review`** — reviews the current branch against its
   merge-base and leaves inline review comments via the MCP tools. Never
@@ -234,10 +237,10 @@ Run the first two as a pair, with a human reading the comments in between: perfo
 review, look at what landed in the gutter, then address it — ideally in a
 fresh agent session so it isn't anchored to its own review.
 
-The command lists every agent it finds and whether all commands are
-installed and current in each, matching the same discovery style as MCP
-registration. Cursor and Windsurf use workspace-scoped command directories,
-so they get a copy-only row pointing at where to paste the prompt by hand.
+The setup list shows every agent it finds with its command state next to its
+MCP registration state. Cursor and Windsurf read commands from
+workspace-scoped directories, which setup does not write — only their MCP
+registration appears in the list.
 
 ### Clipboard Support
 

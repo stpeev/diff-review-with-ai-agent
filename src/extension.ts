@@ -5,15 +5,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { LAUNCHER_FILE } from './mcp-resolve';
-import { McpConsumerTarget, discoverConsumers, register, renderSnippet, snippetDestination } from './mcp-consumers';
-import {
-  SlashCommandTarget,
-  CommandId,
-  discoverSlashCommands,
-  renderClipboard,
-  install,
-  INVOCATION,
-} from './slash-commands';
+import { discoverConsumers, register, renderSnippet } from './mcp-consumers';
+import { discoverSlashCommands, renderClipboard, install } from './slash-commands';
 import { isAncestor, resolveExistingWorkspacePath } from './path-util';
 import { LM_TOOLS, MCP_TOOLS, PolicyTools } from './review-policy';
 import { gitScopeFor } from './git-scope';
@@ -95,13 +88,12 @@ import {
   deployStoragePathPointer as deployStoragePathPointerRuntime,
 } from './adapters/setup/mcp-runtime';
 import {
-  consumerStatusNote,
-  copyConsumerSnippet,
-  registerMcpConsumer,
-  type McpConsumerRegistrationDeps,
-} from './adapters/setup/mcp-consumer-registration';
-import { installAgentSlashCommands } from './adapters/setup/slash-command-installation';
-import { slashCommandRowIcon, slashCommandRowLabel } from './adapters/setup/slash-command-presentation';
+  applySetup,
+  setupRowDescription,
+  setupRowDetail,
+  setupRowIcon,
+  setupRows,
+} from './adapters/setup/setup-command';
 import { autoUpdateInstalledComponents } from './adapters/setup/component-auto-update';
 
 // --------------- Comment Model ---------------
@@ -1393,13 +1385,8 @@ export function activate(context: vscode.ExtensionContext) {
   // --- Show MCP server info ---
   context.subscriptions.push(vscode.commands.registerCommand('diffReview.showMcpInfo', () => showMcpInfo(context)));
 
-  // --- Register the MCP server with a discovered client ---
-  context.subscriptions.push(vscode.commands.registerCommand('diffReview.registerMcpServer', () => showMcpConsumers()));
-
-  // --- Install the agent slash commands ---
-  context.subscriptions.push(
-    vscode.commands.registerCommand('diffReview.installAgentCommands', () => showSlashCommandTargets()),
-  );
+  // --- Setup: register the MCP server and install the agent commands ---
+  context.subscriptions.push(vscode.commands.registerCommand('diffReview.setup', () => showSetup()));
 
   // --- Show comment panel ---
   context.subscriptions.push(vscode.commands.registerCommand('diffReview.showPanel', () => showCommentPanel()));
@@ -1480,205 +1467,60 @@ function createCommentThreadAt(
   return created;
 }
 
-// --------------- Register with an MCP consumer ---------------
-
-const STATUS_ICON: Record<McpConsumerTarget['status'], string> = {
-  current: '$(check)',
-  stale: '$(warning)',
-  missing: '$(circle-outline)',
-};
-
-function mcpConsumerRegistrationDeps(): McpConsumerRegistrationDeps {
-  return {
-    launcherFile: LAUNCHER_FILE,
-    renderSnippet,
-    snippetDestination,
-    register,
-    copy: async (text) => void (await vscode.env.clipboard.writeText(text)),
-    information: async (message, action) =>
-      action
-        ? await vscode.window.showInformationMessage(message, action)
-        : await vscode.window.showInformationMessage(message),
-    confirm: async (message, detail) =>
-      await vscode.window.showInformationMessage(message, { modal: true, detail }, 'Write', 'Copy'),
-    warning: async (message) => void (await vscode.window.showWarningMessage(message)),
-    log,
-    homeShort,
-    installAgentCommands: () => void vscode.commands.executeCommand('diffReview.installAgentCommands'),
-  };
-}
-
-async function copySnippet(target: McpConsumerTarget) {
-  await copyConsumerSnippet(target, mcpConsumerRegistrationDeps());
-}
+// --------------- Setup ---------------
 
 /**
- * Confirm, then write. Every failure path ends at the clipboard rather than a
- * dead end, so a config we cannot edit is still a config the user can fix.
+ * One command for everything installable: register the MCP server and write
+ * the agent commands for whichever rows the user ticks. Nothing is
+ * preselected — ticking a row is the explicit instruction to touch it — and
+ * parts already current are skipped. The clipboard is the fallback for parts
+ * that cannot be written, as it was in the per-component commands this
+ * replaced.
  */
-async function registerWithConsumer(target: McpConsumerTarget) {
-  await registerMcpConsumer(target, mcpConsumerRegistrationDeps());
-}
-
-async function showMcpConsumers() {
-  const revealButton: vscode.QuickInputButton = {
-    iconPath: new vscode.ThemeIcon('folder-opened'),
-    tooltip: 'Reveal in file explorer',
-  };
-  const copyButton: vscode.QuickInputButton = {
-    iconPath: new vscode.ThemeIcon('clippy'),
-    tooltip: 'Copy the config instead of writing it',
-  };
-
+async function showSetup() {
   if (!fs.existsSync(LAUNCHER_FILE)) {
     vscode.window.showWarningMessage(
-      'Diff Review: the MCP launcher is not deployed yet. Run "Diff Review: Show MCP Server Info" to check.',
+      'Diff Review: the MCP launcher is not deployed yet, so setup cannot register the server. Run "Diff Review: Show MCP Server Info" to check.',
     );
     return;
   }
 
-  const targets = discoverConsumers();
-  if (targets.length === 0) {
-    vscode.window.showInformationMessage('Diff Review: no MCP consumers found on this machine.');
+  const rows = setupRows(discoverConsumers(), discoverSlashCommands());
+  if (rows.length === 0) {
+    vscode.window.showInformationMessage('Diff Review: no agents or MCP consumers found on this machine.');
     return;
   }
 
-  const items = targets.map((target) => ({
-    label: `${STATUS_ICON[target.status]} ${target.label}`,
-    description: consumerStatusNote(target),
-    detail: homeShort(target.configPath),
-    buttons: fs.existsSync(target.configPath) ? [copyButton, revealButton] : [copyButton],
-    target,
+  const items = rows.map((row) => ({
+    label: `${setupRowIcon(row)} ${row.label}`,
+    description: setupRowDescription(row),
+    detail: setupRowDetail(row, homeShort),
+    picked: false,
+    row,
   }));
 
-  const picker = vscode.window.createQuickPick<(typeof items)[number]>();
-  picker.title = 'Diff Review — Register MCP Server';
-  picker.placeholder = 'Select where to register the diff-review MCP server';
-  picker.matchOnDetail = true;
-  picker.items = items;
-
-  picker.onDidTriggerItemButton(async (event) => {
-    if (event.button === copyButton) {
-      picker.hide();
-      await copySnippet(event.item.target);
-      return;
-    }
-    await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(event.item.target.configPath));
+  const picked = await vscode.window.showQuickPick(items, {
+    canPickMany: true,
+    title: 'Diff Review — Setup',
+    placeHolder: 'Select the agents to set up — nothing is preselected',
+    matchOnDetail: true,
   });
+  if (!picked?.length) return;
 
-  picker.onDidAccept(async () => {
-    const picked = picker.selectedItems[0];
-    picker.hide();
-    if (picked) {
-      await registerWithConsumer(picked.target);
-    }
-  });
-
-  picker.onDidHide(() => picker.dispose());
-  picker.show();
-}
-
-// --------------- Install agent slash commands ---------------
-
-async function copySlashCommand(target: SlashCommandTarget, command: CommandId) {
-  await vscode.env.clipboard.writeText(renderClipboard(target, command));
-  vscode.window.showInformationMessage(
-    `Diff Review: copied ${INVOCATION[command]} for ${target.label} to the clipboard.`,
+  await applySetup(
+    picked.map((item) => item.row),
+    {
+      registerConsumer: register,
+      installCommands: install,
+      renderSnippet,
+      renderClipboard,
+      copy: async (text) => void (await vscode.env.clipboard.writeText(text)),
+      information: async (message) => void (await vscode.window.showInformationMessage(message)),
+      warning: async (message) => void (await vscode.window.showWarningMessage(message)),
+      log,
+      homeShort,
+    },
   );
-}
-
-async function pickAndCopySlashCommands(target: SlashCommandTarget) {
-  const choice = await vscode.window.showQuickPick(
-    [
-      { label: INVOCATION.perform, command: 'perform' as CommandId },
-      { label: INVOCATION.address, command: 'address' as CommandId },
-      { label: INVOCATION.register, command: 'register' as CommandId },
-      { label: INVOCATION.unregister, command: 'unregister' as CommandId },
-      { label: 'All four', command: undefined },
-    ],
-    { title: `Copy which command for ${target.label}?` },
-  );
-  if (!choice) return;
-
-  if (choice.command) {
-    await copySlashCommand(target, choice.command);
-    return;
-  }
-  const text = (['perform', 'address', 'register', 'unregister'] as CommandId[])
-    .map((c) => renderClipboard(target, c))
-    .join('\n\n');
-  await vscode.env.clipboard.writeText(text);
-  vscode.window.showInformationMessage(`Diff Review: copied all four commands for ${target.label} to the clipboard.`);
-}
-
-/**
- * Confirm, then write the command files. Every failure path ends at the clipboard
- * rather than a dead end, so a file we cannot write is still one the user
- * can paste in by hand.
- */
-async function installSlashCommands(target: SlashCommandTarget) {
-  await installAgentSlashCommands(target, {
-    install,
-    copyCommands: pickAndCopySlashCommands,
-    copyCommand: copySlashCommand,
-    confirm: async (message, detail) =>
-      await vscode.window.showInformationMessage(message, { modal: true, detail }, 'Write', 'Copy'),
-    information: async (message) => void (await vscode.window.showInformationMessage(message)),
-    warning: async (message) => void (await vscode.window.showWarningMessage(message)),
-    log,
-    homeShort,
-  });
-}
-
-async function showSlashCommandTargets() {
-  const revealButton: vscode.QuickInputButton = {
-    iconPath: new vscode.ThemeIcon('folder-opened'),
-    tooltip: 'Reveal in file explorer',
-  };
-  const copyButton: vscode.QuickInputButton = {
-    iconPath: new vscode.ThemeIcon('clippy'),
-    tooltip: 'Copy the commands instead of writing them',
-  };
-
-  const targets = discoverSlashCommands();
-  if (targets.length === 0) {
-    vscode.window.showInformationMessage('Diff Review: no agent slash-command directories found on this machine.');
-    return;
-  }
-
-  const items = targets.map((target) => ({
-    label: `${slashCommandRowIcon(target)} ${target.label}`,
-    description: slashCommandRowLabel(target),
-    detail: homeShort(target.dirPath),
-    buttons: fs.existsSync(target.dirPath) ? [copyButton, revealButton] : [copyButton],
-    target,
-  }));
-
-  const picker = vscode.window.createQuickPick<(typeof items)[number]>();
-  picker.title = 'Diff Review — Install Agent Slash Commands';
-  picker.placeholder = 'Select an agent to install the Diff Review commands';
-  picker.matchOnDetail = true;
-  picker.items = items;
-
-  picker.onDidTriggerItemButton(async (event) => {
-    if (event.button === copyButton) {
-      picker.hide();
-      await pickAndCopySlashCommands(event.item.target);
-      return;
-    }
-    await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(event.item.target.dirPath));
-  });
-
-  picker.onDidAccept(async () => {
-    const picked = picker.selectedItems[0];
-    picker.hide();
-    if (picked) {
-      await installSlashCommands(picked.target);
-    }
-  });
-
-  picker.onDidHide(() => picker.dispose());
-  picker.show();
 }
 
 // --------------- Interactive QuickPick Panel ---------------

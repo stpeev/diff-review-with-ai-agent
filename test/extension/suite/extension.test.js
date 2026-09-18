@@ -14,7 +14,7 @@ suite('Diff Review extension', () => {
       'diffReview.reply',
       'diffReview.resolve',
       'diffReview.showPanel',
-      'diffReview.registerMcpServer',
+      'diffReview.setup',
     ]) {
       assert.ok(commands.includes(command), `Expected ${command} after activation.`);
     }

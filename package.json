@@ -124,14 +124,9 @@
         "icon": "$(server)"
       },
       {
-        "command": "diffReview.registerMcpServer",
-        "title": "Diff Review: Register MCP Server with a Coding Agent",
-        "icon": "$(plug)"
-      },
-      {
-        "command": "diffReview.installAgentCommands",
-        "title": "Diff Review: Install the Diff Review Agent Commands",
-        "icon": "$(terminal)"
+        "command": "diffReview.setup",
+        "title": "Diff Review: Setup",
+        "icon": "$(settings-gear)"
       },
       {
         "command": "diffReview.showPanel",

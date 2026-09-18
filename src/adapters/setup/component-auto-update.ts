@@ -10,7 +10,7 @@
  *
  * Automatic means updating, never installing. A `missing` entry (or a
  * command file the user deleted) is not an instruction to put it back; it is
- * left alone for the explicit install commands to offer.
+ * left alone for the explicit setup command to offer.
  */
 import type { McpConsumerTarget } from '../../mcp-consumers';
 import type { InstallOutcome, SlashCommandTarget } from '../../slash-commands';
