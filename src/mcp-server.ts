@@ -20,6 +20,7 @@ import { postToMcpTarget as ipcPost } from './mcp-target';
 import { writeMcpStartupDiagnostic } from './mcp-startup-diagnostics';
 import { createMcpSessionRegistrar, defaultMcpSessionRegistrationDependencies } from './mcp-session-registration';
 import { registerMcpTools } from './mcp-tool-registration';
+import { VERSION } from './version';
 
 // ---------- MCP Server ----------
 
@@ -43,7 +44,7 @@ const sessionRegistrar = createMcpSessionRegistrar(defaultMcpSessionRegistration
 export function createMcpServer(): McpServer {
   const server = new McpServer({
     name: 'diff-review',
-    version: '0.1.0',
+    version: VERSION,
   });
   registerMcpTools(server, sessionRegistrar, mcpLog);
   return server;

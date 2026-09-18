@@ -1,6 +1,12 @@
 import { defineConfig } from 'vitest/config';
+import pkg from './package.json';
 
 export default defineConfig({
+  // Mirror the production Vite define so tests see the real injected version
+  // (`src/version.ts`); its sibling test asserts it matches the manifest.
+  define: {
+    __DIFF_REVIEW_VERSION__: JSON.stringify(pkg.version),
+  },
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts', 'test/**/*.integration.ts', 'src/**/*.test.ts'],

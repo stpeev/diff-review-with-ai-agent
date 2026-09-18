@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
+import pkg from './package.json';
 
 const entries = {
   extension: resolve(__dirname, 'src/extension.ts'),
@@ -18,6 +19,12 @@ export default defineConfig(({ mode }) => {
   const entry = entryFor(mode);
 
   return {
+    // The MCP server bundle has no extension context to read its manifest
+    // from, so the package version is baked in at build time instead
+    // (`src/version.ts`; its sibling test proves the injected value matches).
+    define: {
+      __DIFF_REVIEW_VERSION__: JSON.stringify(pkg.version),
+    },
     resolve: {
       // jsonc-parser's ESM entry is required for a self-contained VSIX.
       mainFields: ['module', 'main'],
