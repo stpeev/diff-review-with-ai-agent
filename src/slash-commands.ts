@@ -162,7 +162,7 @@ If it reports nothing yet, call \`awaitReview\` again while the user is still
 reviewing. Each wait returns within 45 seconds so it stays below the configured
 60-second MCP tool timeout.
 
-${sectionedPolicy({ tools: MCP_TOOLS, threadRef: 'listed' }, 2)}`,
+${sectionedPolicy(MCP_TOOLS, 2)}`,
   register: `${MARKER.register}
 
 # Register for Diff Review Send

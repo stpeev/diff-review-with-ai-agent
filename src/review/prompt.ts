@@ -1,4 +1,4 @@
-import { prosePolicy, type PolicyTools } from '../review-policy';
+import type { PolicyTools } from '../review-policy';
 
 export interface PromptComment {
   role: 'user' | 'agent';
@@ -14,6 +14,13 @@ export interface PromptThread {
   diffHunk?: string;
 }
 
+/**
+ * Render review threads as a plain message: the comments themselves, then a
+ * single closing line naming the reply and resolve tools. Deliberately not a
+ * procedure — the step-by-step policy exists only in `/address-diff-review`
+ * (`sectionedPolicy`), which the user invokes explicitly. Do not grow the
+ * policy back in here.
+ */
 export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools): string {
   const byFile = new Map<string, PromptThread[]>();
   for (const thread of threads) {
@@ -22,11 +29,7 @@ export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools):
     byFile.set(thread.file, fileThreads);
   }
 
-  const parts = [
-    threads.length === 1
-      ? 'Address only the following review comment. Do not list or act on other open review threads. The comment includes the file, line number, surrounding code context, the git diff (if available), and the comment text itself.\n'
-      : 'Inspect the following review comments to the code. Each comment includes the file, line number, surrounding code context, the git diff (if available), and the comment text itself.\n',
-  ];
+  const parts: string[] = [];
   for (const [file, fileThreads] of byFile) {
     parts.push(`#### ${file}\n`);
     for (const thread of [...fileThreads].sort((a, b) => a.startLine - b.startLine)) {
@@ -44,6 +47,8 @@ export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools):
       parts.push(`**Comment:** ${body}\n`);
     }
   }
-  parts.push('---', prosePolicy({ tools, threadRef: 'inline' }));
+  parts.push(
+    `Reply in each thread with \`${tools.reply}\` (threadId and text); \`${tools.resolve}\` marks it resolved.`,
+  );
   return parts.join('\n');
 }
