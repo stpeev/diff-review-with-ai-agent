@@ -72,15 +72,6 @@ export async function main() {
     relevantEnvironment: diagnosticEnvironment(process.env),
   });
   mcpLog(`Starting MCP server (pid ${process.pid}, cwd ${process.cwd()})`);
-  const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID;
-  const codexThreadId = process.env.CODEX_THREAD_ID;
-  if (claudeSessionId) {
-    await sessionRegistrar.registerClaudeSession(claudeSessionId);
-  } else if (codexThreadId) {
-    await sessionRegistrar.registerCodexSession(codexThreadId);
-  } else {
-    mcpLog('No startup session environment detected; Codex will register on its first tool call');
-  }
   mcpLog('Connecting stdio transport');
   server.server.oninitialized = () =>
     writeStartupDiagnostic('mcp-initialized', {

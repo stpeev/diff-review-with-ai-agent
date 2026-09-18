@@ -23,8 +23,19 @@ export function registerMcpTools(
   log: (message: string) => void,
 ): void {
   const boundedTools = server as unknown as BoundedToolRegistrar;
-  let lastReviewGeneration = 0;
+  const reviewState = { lastReviewGeneration: 0 };
 
+  defineRegisterAgentSession(boundedTools, registrar);
+  defineUnregisterAgentSession(boundedTools, registrar, log);
+  defineListDiffComments(boundedTools);
+  defineAwaitReview(boundedTools, reviewState);
+  defineCreateDiffComment(boundedTools);
+  defineReplyToDiffComment(boundedTools);
+  defineResolveDiffComment(boundedTools);
+  defineDeleteDiffComment(boundedTools);
+}
+
+function defineRegisterAgentSession(boundedTools: BoundedToolRegistrar, registrar: McpSessionRegistrar): void {
   const registerAgentSessionInput = z.object({
     label: z.string().optional().describe('A short human-readable name for this conversation, derived from its topic'),
   });
@@ -64,7 +75,13 @@ export function registerMcpTools(
       };
     },
   );
+}
 
+function defineUnregisterAgentSession(
+  boundedTools: BoundedToolRegistrar,
+  registrar: McpSessionRegistrar,
+  log: (message: string) => void,
+): void {
   boundedTools.tool(
     'unregisterAgentSession',
     'Remove this agent conversation as a target for direct Diff Review delivery',
@@ -105,8 +122,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
-  // Tool 1: List comments
+function defineListDiffComments(boundedTools: BoundedToolRegistrar): void {
   boundedTools.tool(
     'listDiffComments',
     'List all inline review comments with their IDs, file locations, status, and thread text',
@@ -138,7 +156,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
+function defineAwaitReview(boundedTools: BoundedToolRegistrar, state: { lastReviewGeneration: number }): void {
   boundedTools.tool(
     'awaitReview',
     'Wait for the user to send review comments, then return an instruction to list and address them',
@@ -147,11 +167,11 @@ export function registerMcpTools(
       try {
         const target = await resolveMcpTarget();
         const result = await getIpcJson<{ pending?: boolean; generation?: number }>(
-          `/review/await?since=${lastReviewGeneration}`,
+          `/review/await?since=${state.lastReviewGeneration}`,
           target,
           50000,
         );
-        lastReviewGeneration = result.generation ?? lastReviewGeneration;
+        state.lastReviewGeneration = result.generation ?? state.lastReviewGeneration;
         return {
           content: [
             {
@@ -167,8 +187,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
-  // Tool 2: Create comment
+function defineCreateDiffComment(boundedTools: BoundedToolRegistrar): void {
   const createDiffCommentInput = z.object({
     path: z.string().describe('Workspace-relative file path, e.g. "src/foo.ts"'),
     line: z.number().describe('1-based line number to attach the comment to'),
@@ -194,8 +215,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
-  // Tool 3: Reply to comment
+function defineReplyToDiffComment(boundedTools: BoundedToolRegistrar): void {
   const replyToDiffCommentInput = z.object({
     threadId: z.number().describe('The thread ID from listDiffComments (e.g. 1, 2)'),
     text: z.string().describe('The reply text'),
@@ -215,8 +237,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
-  // Tool 4: Resolve comment
+function defineResolveDiffComment(boundedTools: BoundedToolRegistrar): void {
   const resolveDiffCommentInput = z.object({
     threadId: z.number().describe('The thread ID to resolve'),
   });
@@ -235,8 +258,9 @@ export function registerMcpTools(
       }
     },
   );
+}
 
-  // Tool 5: Delete comment
+function defineDeleteDiffComment(boundedTools: BoundedToolRegistrar): void {
   const deleteDiffCommentInput = z.object({
     threadId: z.number().describe('The thread ID to delete'),
   });
