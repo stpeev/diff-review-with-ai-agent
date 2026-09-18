@@ -78,6 +78,13 @@ test('renderBody: command markers are distinct', () => {
   assert.strictEqual(new Set(Object.values(MARKER)).size, 4);
 });
 
+test('MARKER: each command renders its documented marker line', () => {
+  assert.strictEqual(MARKER.perform, '<!-- diff-review:perform v1 -->');
+  assert.strictEqual(MARKER.address, '<!-- diff-review:address v2 -->');
+  assert.strictEqual(MARKER.register, '<!-- diff-review:register-send v1 -->');
+  assert.strictEqual(MARKER.unregister, '<!-- diff-review:unregister-send v1 -->');
+});
+
 function bodyAfterMarker(rendered: string, marker: string, kind: CommandKind): string {
   const idx = rendered.indexOf(marker);
   let body = rendered.slice(idx);
@@ -250,6 +257,30 @@ test('discoverSlashCommands: a stale file with our marker is writable', () => {
   assert.strictEqual(perform.writable, true);
 });
 
+test('discoverSlashCommands: a stale file from an older marker version is still ours', () => {
+  const home = tmpHome();
+  const dir = path.join(home, '.claude', 'commands');
+  fs.mkdirSync(dir, { recursive: true });
+  // What this project itself installed before the address body moved to v2:
+  // a version bump must not read our own previous output as a foreign file.
+  fs.writeFileSync(path.join(dir, 'address-diff-review.md'), '<!-- diff-review:address v1 -->\nold body\n');
+  const address = fileFor(targetFor(discoverSlashCommands({ home, platform: 'linux' }), 'claude'), 'address');
+  assert.strictEqual(address.status, 'stale');
+  assert.strictEqual(address.writable, true);
+});
+
+test("discoverSlashCommands: another command's marker does not make a file ours", () => {
+  const home = tmpHome();
+  const dir = path.join(home, '.claude', 'commands');
+  fs.mkdirSync(dir, { recursive: true });
+  // `register-send` is a suffix of `unregister-send`, so the wrong command's
+  // marker is the case most likely to claim a file by accident.
+  fs.writeFileSync(path.join(dir, 'register-for-diff-review-send.md'), `${MARKER.unregister}\nnot ours\n`);
+  const register = fileFor(targetFor(discoverSlashCommands({ home, platform: 'linux' }), 'claude'), 'register');
+  assert.strictEqual(register.writable, false);
+  assert.match(required(register.reason), /not written by Diff Review/);
+});
+
 test('discoverSlashCommands: a stale file without our marker is not writable', () => {
   const home = tmpHome();
   const dir = path.join(home, '.claude', 'commands');
@@ -411,6 +442,22 @@ test('install: backs up a stale-with-marker file before overwriting it', () => {
   assert.strictEqual(
     fs.readFileSync(path.join(dir, 'perform-diff-review.md'), 'utf-8'),
     renderBody('claude-md', 'perform'),
+  );
+});
+
+test('install: upgrades a file carrying an older marker version and backs it up', () => {
+  const home = tmpHome();
+  const dir = path.join(home, '.claude', 'commands');
+  fs.mkdirSync(dir, { recursive: true });
+  const previous = '<!-- diff-review:address v1 -->\nold body\n';
+  fs.writeFileSync(path.join(dir, 'address-diff-review.md'), previous);
+  const target = targetFor(discoverSlashCommands({ home, platform: 'linux' }), 'claude');
+  const result = required(install(target).written.find((w) => w.command === 'address'));
+  assert.ok(result.backup);
+  assert.strictEqual(fs.readFileSync(result.backup, 'utf-8'), previous);
+  assert.strictEqual(
+    fs.readFileSync(path.join(dir, 'address-diff-review.md'), 'utf-8'),
+    renderBody('claude-md', 'address'),
   );
 });
 

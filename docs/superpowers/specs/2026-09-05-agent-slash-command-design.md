@@ -227,7 +227,10 @@ its format:
 ```
 
 A `stale` file **with** its marker is a previous version of ours: safe to
-overwrite, backed up first. A `stale` file **without** it was written by the
+overwrite, backed up first. Ownership is decided by the marker's tag — the
+command name — at **any** version, not by the exact current marker line, so a
+file an earlier release installed is still ours to upgrade when the version
+bumps. A `stale` file **without** it was written by the
 user or another tool: that `CommandFile` degrades to `writable: false` with
 `reason: 'file not written by Diff Review'`, and the only offered action is
 copy.

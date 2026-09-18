@@ -30,11 +30,34 @@ export const INVOCATION: Record<CommandId, string> = {
   unregister: '/unregister-for-diff-review-send',
 };
 
+/**
+ * The two halves of a command's marker, kept together because they are one
+ * fact per command and always change on the same terms:
+ *
+ * - `tag` identifies the command and does not change. Ownership of a file on
+ *   disk is decided from it alone — see `hasOwnMarker` — so a file left by an
+ *   earlier release is still ours.
+ * - `version` bumps for one command when that command's body changes, and
+ *   only then.
+ */
+const MARKER_SPEC: Record<CommandId, { tag: string; version: number }> = {
+  perform: { tag: 'perform', version: 1 },
+  address: { tag: 'address', version: 2 },
+  register: { tag: 'register-send', version: 1 },
+  unregister: { tag: 'unregister-send', version: 1 },
+};
+
+function markerFor(command: CommandId): string {
+  const { tag, version } = MARKER_SPEC[command];
+  return `<!-- diff-review:${tag} v${version} -->`;
+}
+
+/** The current marker line, rendered at the top of every wrapper. */
 export const MARKER: Record<CommandId, string> = {
-  perform: '<!-- diff-review:perform v1 -->',
-  address: '<!-- diff-review:address v2 -->',
-  register: '<!-- diff-review:register-send v1 -->',
-  unregister: '<!-- diff-review:unregister-send v1 -->',
+  perform: markerFor('perform'),
+  address: markerFor('address'),
+  register: markerFor('register'),
+  unregister: markerFor('unregister'),
 };
 
 const DESCRIPTION: Record<CommandId, string> = {
@@ -262,6 +285,18 @@ function fileName(command: CommandId, kind: CommandKind): string {
   return `${base}.${EXT[kind]}`;
 }
 
+/**
+ * Whether `text` is a body Diff Review wrote — carrying any version of this
+ * command's marker, not only the current one. A file left behind by an
+ * earlier release holds an older version number, and being out of date is
+ * precisely why it is being rewritten: matching the current marker literally
+ * would read our own previous output as a foreign file and refuse to upgrade
+ * it. Tags and versions are `[a-z0-9.-]` only, so they need no regex escaping.
+ */
+function hasOwnMarker(text: string, command: CommandId): boolean {
+  return new RegExp(`<!-- diff-review:${MARKER_SPEC[command].tag} v[0-9][\\w.-]* -->`).test(text);
+}
+
 function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): CommandFile {
   const filePath = path.join(dirPath, fileName(command, kind));
   const text = readText(filePath);
@@ -271,8 +306,7 @@ function inspectFile(dirPath: string, command: CommandId, kind: CommandKind): Co
   if (text === null) return { ...base, status: 'missing', writable: true };
   if (text === expected) return { ...base, status: 'current', writable: true };
 
-  const hasMarker = text.includes(MARKER[command]);
-  return hasMarker
+  return hasOwnMarker(text, command)
     ? { ...base, status: 'stale', writable: true }
     : { ...base, status: 'stale', writable: false, reason: 'file not written by Diff Review' };
 }
