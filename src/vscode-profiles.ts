@@ -14,12 +14,14 @@ export interface AppSpec {
   dir: string;
 }
 
+// TEMP EXPERIMENT (2026-09-18): VS Code-family rows disabled to see what
+// depends on them. Both consumers go quiet while this is in place. Restore.
 export const VSCODE_APPS: AppSpec[] = [
-  { id: 'vscode', label: 'VS Code', dir: 'Code' },
-  { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
-  { id: 'vscodium', label: 'VSCodium', dir: 'VSCodium' },
-  { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
-  { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
+  // { id: 'vscode', label: 'VS Code', dir: 'Code' },
+  // { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
+  // { id: 'vscodium', label: 'VSCodium', dir: 'VSCodium' },
+  // { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
+  // { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
 ];
 
 /**
