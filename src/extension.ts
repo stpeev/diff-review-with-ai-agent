@@ -1349,12 +1349,6 @@ export function activate(context: vscode.ExtensionContext) {
     findThread: findThreadForComment,
     publicId: (thread) => threadIndex.publicId(thread),
     relativePath: vscode.workspace.asRelativePath,
-    confirmThreadDeletion: async (commentCount) =>
-      (await vscode.window.showWarningMessage(
-        `Delete this comment thread and all ${commentCount} comments in it?`,
-        { modal: true },
-        'Delete',
-      )) === 'Delete',
     refresh,
     queueSave: queueSaveForUri,
     log,

@@ -10,15 +10,14 @@ export interface ReviewDeletionCommandDeps<Thread> {
   findThread(comment: ReviewComment): Thread | undefined;
   publicId(thread: Thread): number | undefined;
   relativePath(uri: vscode.Uri): string;
-  confirmThreadDeletion(commentCount: number): Promise<boolean>;
   refresh(): void;
   queueSave(uri: vscode.Uri): void;
   log(message: string): void;
 }
 
 /**
- * Register deletion commands. Confirmation and messages belong to the VS Code
- * boundary; ReviewService owns the deletion mutation and its view effects.
+ * Register deletion commands. Messages belong to the VS Code boundary;
+ * ReviewService owns the deletion mutation and its view effects.
  */
 export function registerReviewDeletionCommands<Thread extends vscode.CommentThread>(
   subscriptions: vscode.Disposable[],
@@ -41,9 +40,8 @@ export function registerReviewDeletionCommands<Thread extends vscode.CommentThre
     }),
   );
   subscriptions.push(
-    deps.registerCommand('diffReview.deleteThread', async (thread: Thread) => {
+    deps.registerCommand('diffReview.deleteThread', (thread: Thread) => {
       const commentCount = thread.comments.length;
-      if (commentCount > 1 && !(await deps.confirmThreadDeletion(commentCount))) return;
       const threadId = deps.publicId(thread);
       if (threadId === undefined || deps.reviewService.delete(threadId).ok === false) return;
       deps.log(
