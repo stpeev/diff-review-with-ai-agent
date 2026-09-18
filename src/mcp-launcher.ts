@@ -21,12 +21,21 @@
 import { createRequire } from 'module';
 import { resolveServer } from './mcp-resolve';
 
+function fail(message: string): never {
+  // stdout is the MCP transport, so diagnostics must go to stderr.
+  process.stderr.write(`[diff-review] ${message}\n`);
+  process.exit(1);
+}
+
 try {
   // The path is only known at runtime, so this has to be a real require
   // rather than an import the bundler would try to follow.
-  createRequire(__filename)(resolveServer().path);
+  const loaded = createRequire(__filename)(resolveServer().path);
+  // Requiring the server leaves `require.main` pointing here, so its own
+  // entry-point guard never fires — start it explicitly.
+  if (typeof loaded?.main === 'function') {
+    loaded.main().catch((err: any) => fail(err?.stack ?? err?.message ?? String(err)));
+  }
 } catch (err: any) {
-  // stdout is the MCP transport, so diagnostics must go to stderr.
-  process.stderr.write(`[diff-review] ${err.message}\n`);
-  process.exit(1);
+  fail(err.message);
 }
