@@ -1,6 +1,5 @@
 # TODO
 
-- [ ] Upon load - check if some componenets like mcp-server or commands are already installed at some location, if so - update them automatically withoout asking user for confirmation
 - [ ] Instead of multiple install XXX commands - have just one 'setup diff-review' that does all installations: mcp-server, commands, what else..?
 - [ ] F6 (soft-delete + `Diff Review: Restore Deleted Comments`) and F7 (`Diff Review: Recover Comments` over stranded scopes) from `docs/superpowers/specs/2026-09-05-comment-storage-durability.md` — F1–F5 are implemented, these two are not
 - [ ] Broaden extension-host coverage beyond activation and packaged smoke checks: exercise real `vscode.CommentThread` lifecycle, multi-root branch transitions, drift recovery, and MCP end-to-end delivery.
@@ -17,3 +16,4 @@
 - [x] Add a command to auto discover and add the MCP server (`Diff Review: Register MCP Server with a Coding Agent`)
 - [x] Add a command to install `/perform-diff-review`, `/address-diff-review`, `/register-for-diff-review-send`, and `/unregister-for-diff-review-send` as agent slash commands (`Diff Review: Install the Diff Review Agent Commands`) — see `docs/superpowers/specs/2026-09-05-agent-slash-command-design.md`
 - [x] Move comment storage off `workspaceState` into `<globalStorageUri>/scopes/<scopeId>/comments.json` — stable across version upgrades (unlike the old versioned-install-folder concern), works without git, and survives two windows on the same folder (F1-F5 of the storage durability spec: scoped IPC ports, never-latch-`_default` git detection, the scope/storage move itself, content-based anchoring with a "Needs re-attaching" drift UI, and a reliable debounced write queue)
+- [x] Upon extension load - check if some components like mcp-server or commands are already installed at some location, if so - update them automatically without asking user for confirmation. Log the activity. (`src/adapters/setup/component-auto-update.ts`: stale-but-writable MCP registrations and agent command files are refreshed in place on activation; missing/current/non-writable ones are never touched, and every update or failure goes to the Diff Review output channel)

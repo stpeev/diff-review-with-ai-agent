@@ -14,6 +14,7 @@ TODO.md
 .sandbox
 coverage
 .github
+docs/**
 AGENTS.md
 eslint.config.mjs
 tsconfig.test.json

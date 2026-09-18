@@ -102,6 +102,7 @@ import {
 } from './adapters/setup/mcp-consumer-registration';
 import { installAgentSlashCommands } from './adapters/setup/slash-command-installation';
 import { slashCommandRowIcon, slashCommandRowLabel } from './adapters/setup/slash-command-presentation';
+import { autoUpdateInstalledComponents } from './adapters/setup/component-auto-update';
 
 // --------------- Comment Model ---------------
 
@@ -1314,6 +1315,19 @@ export function activate(context: vscode.ExtensionContext) {
   if (!storagePointerDeployment.ok) {
     log(`Could not write storage-path pointer: ${storagePointerDeployment.error}`);
   }
+
+  // --- Refresh previously installed components (MCP registrations, agent
+  //     commands) that a version change left out of date. Existing installs
+  //     are updated in place without a prompt; never-installed ones are left
+  //     alone. Every change and failure is logged. ---
+  autoUpdateInstalledComponents({
+    discoverConsumers,
+    discoverCommands: discoverSlashCommands,
+    registerConsumer: register,
+    installCommands: install,
+    homeShort,
+    log,
+  });
 
   // --- IPC Server ---
   startIpcServer(context)
