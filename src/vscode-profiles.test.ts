@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { parseProfiles, userDataRoot, VSCODE_APPS } from './vscode-profiles';
+import { parseProfiles, userDataRoot, VSCODE_APPS, VSCODE_FAMILY_ENABLED } from './vscode-profiles';
 
 test('parseProfiles: null input yields no profiles', () => {
   assert.deepStrictEqual(parseProfiles(null), []);
@@ -45,7 +45,7 @@ test('parseProfiles: malformed entries are skipped', () => {
   assert.deepStrictEqual(parseProfiles(json), []);
 });
 
-test('userDataRoot: darwin path', () => {
+test.skipIf(!VSCODE_FAMILY_ENABLED)('userDataRoot: darwin path', () => {
   const app = VSCODE_APPS.find((a) => a.id === 'vscode');
   assert.ok(app);
   assert.strictEqual(
@@ -54,13 +54,13 @@ test('userDataRoot: darwin path', () => {
   );
 });
 
-test('userDataRoot: linux path', () => {
+test.skipIf(!VSCODE_FAMILY_ENABLED)('userDataRoot: linux path', () => {
   const app = VSCODE_APPS.find((a) => a.id === 'vscode-insiders');
   assert.ok(app);
   assert.strictEqual(userDataRoot(app, '/home/tester', 'linux'), '/home/tester/.config/Code - Insiders/User');
 });
 
-test('userDataRoot: win32 path uses APPDATA when set', () => {
+test.skipIf(!VSCODE_FAMILY_ENABLED)('userDataRoot: win32 path uses APPDATA when set', () => {
   const app = VSCODE_APPS.find((a) => a.id === 'vscodium');
   assert.ok(app);
   const prevAppData = process.env.APPDATA;

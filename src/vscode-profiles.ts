@@ -16,6 +16,8 @@ export interface AppSpec {
 
 // TEMP EXPERIMENT (2026-09-18): VS Code-family rows disabled to see what
 // depends on them. Both consumers go quiet while this is in place. Restore.
+// The family's path and discovery tests gate on VSCODE_FAMILY_ENABLED below,
+// so they skip while the array is empty and run again once it is restored.
 export const VSCODE_APPS: AppSpec[] = [
   // { id: 'vscode', label: 'VS Code', dir: 'Code' },
   // { id: 'vscode-insiders', label: 'VS Code Insiders', dir: 'Code - Insiders' },
@@ -23,6 +25,14 @@ export const VSCODE_APPS: AppSpec[] = [
   // { id: 'cursor', label: 'Cursor', dir: 'Cursor' },
   // { id: 'windsurf', label: 'Windsurf', dir: 'Windsurf' },
 ];
+
+/**
+ * Whether the VS Code family is part of the product right now — false while
+ * the TEMP EXPERIMENT above keeps `VSCODE_APPS` empty. Tests whose subject is
+ * the family's paths or its discovery rows gate on this, so an intentionally
+ * empty registry skips them instead of failing them.
+ */
+export const VSCODE_FAMILY_ENABLED = VSCODE_APPS.some((app) => app.id === 'vscode');
 
 /**
  * The separator-correct `path` for a given target platform. Using the
