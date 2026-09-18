@@ -1,5 +1,6 @@
 # TODO
 
+- [ ] Be less instructional how the coding assistant should act on comment. Its more natural to treat is barebone - as it would trean a normal chat message I believe.
 - [ ] F6 (soft-delete + `Diff Review: Restore Deleted Comments`) and F7 (`Diff Review: Recover Comments` over stranded scopes) from `docs/superpowers/specs/2026-09-05-comment-storage-durability.md` — F1–F5 are implemented, these two are not
 - [ ] Broaden extension-host coverage beyond activation and packaged smoke checks: exercise real `vscode.CommentThread` lifecycle, multi-root branch transitions, drift recovery, and MCP end-to-end delivery.
 
