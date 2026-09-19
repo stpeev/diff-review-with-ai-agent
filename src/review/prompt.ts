@@ -15,11 +15,21 @@ export interface PromptThread {
 }
 
 /**
- * Render review threads as a plain message: the comments themselves, then a
- * single closing line naming the reply and resolve tools. Deliberately not a
- * procedure — the step-by-step policy exists only in `/address-diff-review`
- * (`sectionedPolicy`), which the user invokes explicitly. Do not grow the
- * policy back in here.
+ * Render review threads as a plain message: the comments themselves, then one
+ * closing line that names both destinations — reply in this conversation, and
+ * a short summary in the thread itself — along with the tools for each.
+ * Deliberately not a procedure: the step-by-step policy exists only in
+ * `/address-diff-review` (`sectionedPolicy`), which the user invokes
+ * explicitly. Do not grow the policy back in here.
+ *
+ * The two destinations are not interchangeable. The reply/resolve tools write
+ * into the gutter, where only future readers of that thread see them; the
+ * answer the user actually reads at the time is the turn in whatever
+ * conversation this prompt arrived in — the chat panel for `LM_TOOLS`, the
+ * agent's own session for `MCP_TOOLS`. A closing line naming only the tools
+ * gets the whole job done inside the gutter and nothing said back, so both
+ * belong in this line. It stays a clause on the last line, not a fifth bullet.
+ * See src/review/prompt.test.ts.
  */
 export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools): string {
   const byFile = new Map<string, PromptThread[]>();
@@ -48,7 +58,8 @@ export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools):
     }
   }
   parts.push(
-    `Reply in each thread with \`${tools.reply}\` (threadId and text); \`${tools.resolve}\` marks it resolved.`,
+    `Reply here and then copy a short summary into the thread with \`${tools.reply}\` (threadId and text); ` +
+      `if it makes sense mark it resolved with \`${tools.resolve}\`.`,
   );
   return parts.join('\n');
 }

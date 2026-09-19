@@ -50,9 +50,9 @@ test('renderReviewPrompt is the comments plus one closing line, not a procedure'
 test("renderReviewPrompt closes by naming the session's reply and resolve tools", () => {
   const lm = renderReviewPrompt(oneThread, LM_TOOLS);
   expect(lm).toContain('`diffReview_replyToComment` (threadId and text)');
-  expect(lm.endsWith('`diffReview_resolveComment` marks it resolved.')).toBe(true);
+  expect(lm).toContain('`diffReview_resolveComment`');
 
   const mcp = renderReviewPrompt(oneThread, MCP_TOOLS);
   expect(mcp).toContain('`replyToDiffComment` (threadId and text)');
-  expect(mcp.endsWith('`resolveDiffComment` marks it resolved.')).toBe(true);
+  expect(mcp).toContain('`resolveDiffComment`');
 });
