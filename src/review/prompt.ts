@@ -58,7 +58,7 @@ export function renderReviewPrompt(threads: PromptThread[], tools: PolicyTools):
     }
   }
   parts.push(
-    `Reply here and then copy a short summary into the thread with \`${tools.reply}\` (threadId and text); ` +
+    `Reply here. Then summarize the reply into the thread with \`${tools.reply}\` (threadId and text); ` +
       `if it makes sense mark it resolved with \`${tools.resolve}\`.`,
   );
   return parts.join('\n');
