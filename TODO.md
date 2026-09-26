@@ -1,12 +1,13 @@
 # TODO
 
-- [ ] Add a command for the MCP to re-scan the extension IPC port where its listening. Or even better make it automatic - i.e every 1 minute. Else if I restart vscode while T3 (keep in mind T3 is external app outside vscode) is keeping the Claude session - it looses connectivity to the extension. Actually the existing /register-for-diff-review-send should mandatory do the re-scanning when invoked.
+- [ ] Support VSCode remote development mode, see https://code.visualstudio.com/docs/remote/tunnels and https://code.visualstudio.com/api/advanced-topics/remote-extensions
 - [ ] F6 (soft-delete + `Diff Review: Restore Deleted Comments`) and F7 (`Diff Review: Recover Comments` over stranded scopes) from `docs/superpowers/specs/2026-09-05-comment-storage-durability.md` — F1–F5 are implemented, these two are not
 - [ ] Broaden extension-host coverage beyond activation and packaged smoke checks: exercise real `vscode.CommentThread` lifecycle, multi-root branch transitions, drift recovery, and MCP end-to-end delivery.
 
 
 # DONE
 
+- [x] Reconnect the MCP server to the extension after a VS Code restart: re-scan the IPC port every minute and on failed calls, re-register sessions with the new window, and make `/register-for-diff-review-send` always re-scan. See `docs/superpowers/specs/2026-09-24-mcp-ipc-reconnect.md`.
 - [x] The tests be siblings of the source code files themselves
 - [x] Adopt Vite for production bundles, Vitest for source-level tests, explicit TypeScript checking, Prettier, ESLint, and `npm run check`; see `README.md` for the developer command contract.
 - [x] Add `AGENTS.md` with review-service, persistence, and verification ownership rules.
