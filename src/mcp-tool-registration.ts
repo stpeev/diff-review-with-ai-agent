@@ -1,8 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { codexThreadIdFromMeta } from './agent-registry';
-import { getIpcJson } from './protocol/client';
-import { postToMcpTarget as ipcPost, resolveMcpTarget } from './mcp-target';
+import { getFromMcpTarget, postToMcpTarget as ipcPost, type TargetResolver } from './mcp-target';
 import type { McpSessionRegistrar } from './mcp-session-registration';
 
 type TextToolResult = { content: { type: 'text'; text: string }[] };
@@ -17,15 +16,22 @@ interface BoundedToolRegistrar {
   ): unknown;
 }
 
+export type McpTargetControl = Pick<TargetResolver, 'reconnect' | 'onTargetChanged'>;
+
 export function registerMcpTools(
   server: McpServer,
   registrar: McpSessionRegistrar,
   log: (message: string) => void,
+  targets: McpTargetControl,
 ): void {
   const boundedTools = server as unknown as BoundedToolRegistrar;
   const reviewState = { lastReviewGeneration: 0 };
+  // A new window counts review generations from 0 again.
+  targets.onTargetChanged(() => {
+    reviewState.lastReviewGeneration = 0;
+  });
 
-  defineRegisterAgentSession(boundedTools, registrar);
+  defineRegisterAgentSession(boundedTools, registrar, targets);
   defineUnregisterAgentSession(boundedTools, registrar, log);
   defineListDiffComments(boundedTools);
   defineAwaitReview(boundedTools, reviewState);
@@ -35,7 +41,11 @@ export function registerMcpTools(
   defineDeleteDiffComment(boundedTools);
 }
 
-function defineRegisterAgentSession(boundedTools: BoundedToolRegistrar, registrar: McpSessionRegistrar): void {
+function defineRegisterAgentSession(
+  boundedTools: BoundedToolRegistrar,
+  registrar: McpSessionRegistrar,
+  targets: McpTargetControl,
+): void {
   const registerAgentSessionInput = z.object({
     label: z.string().optional().describe('A short human-readable name for this conversation, derived from its topic'),
   });
@@ -60,9 +70,18 @@ function defineRegisterAgentSession(boundedTools: BoundedToolRegistrar, registra
       }
       const agent = codexSessionId ? 'Codex' : 'Claude';
       const sessionId = codexSessionId ?? claudeSessionId!;
+      try {
+        await targets.reconnect();
+      } catch (error: any) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Could not register this ${agent} session: ${error.message ?? error}` },
+          ],
+        };
+      }
       const outcome = codexSessionId
-        ? await registrar.registerCodexSession(codexSessionId, label)
-        : await registrar.registerClaudeSession(claudeSessionId!, label);
+        ? await registrar.registerCodexSession(codexSessionId, label, { force: true })
+        : await registrar.registerClaudeSession(claudeSessionId!, label, { force: true });
       return {
         content: [
           {
@@ -131,8 +150,7 @@ function defineListDiffComments(boundedTools: BoundedToolRegistrar): void {
     {},
     async () => {
       try {
-        const target = await resolveMcpTarget();
-        const state = await getIpcJson<{
+        const state = await getFromMcpTarget<{
           threads?: {
             id: number;
             uri: string;
@@ -140,7 +158,7 @@ function defineListDiffComments(boundedTools: BoundedToolRegistrar): void {
             status: string;
             comments: { role: string; body: string }[];
           }[];
-        }>('/comments', target);
+        }>('/comments');
         if (!state.threads || state.threads.length === 0) {
           return { content: [{ type: 'text' as const, text: 'No review comments.' }] };
         }
@@ -165,10 +183,8 @@ function defineAwaitReview(boundedTools: BoundedToolRegistrar, state: { lastRevi
     {},
     async () => {
       try {
-        const target = await resolveMcpTarget();
-        const result = await getIpcJson<{ pending?: boolean; generation?: number }>(
+        const result = await getFromMcpTarget<{ pending?: boolean; generation?: number }>(
           `/review/await?since=${state.lastReviewGeneration}`,
-          target,
           50000,
         );
         state.lastReviewGeneration = result.generation ?? state.lastReviewGeneration;

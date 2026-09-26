@@ -16,7 +16,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { descriptorDir } from './ipc-discovery';
 import { diagnosticEnvironment, sanitizeDiagnostic } from './agent-diagnostics';
-import { postToMcpTarget as ipcPost } from './mcp-target';
+import { mcpTargetResolver, postToMcpTarget as ipcPost } from './mcp-target';
+import { startTargetHeartbeat } from './mcp-heartbeat';
 import { writeMcpStartupDiagnostic } from './mcp-startup-diagnostics';
 import { createMcpSessionRegistrar, defaultMcpSessionRegistrationDependencies } from './mcp-session-registration';
 import { registerMcpTools } from './mcp-tool-registration';
@@ -40,13 +41,18 @@ function writeStartupDiagnostic(event: string, details: Record<string, unknown>)
 
 const sessionRegistrar = createMcpSessionRegistrar(defaultMcpSessionRegistrationDependencies(ipcPost, mcpLog));
 
+// A restarted window has forgotten every session, so tell it about them again.
+mcpTargetResolver.onTargetChanged(() => {
+  void sessionRegistrar.replayAll();
+});
+
 /** Construct the reusable MCP application without opening a transport. */
 export function createMcpServer(): McpServer {
   const server = new McpServer({
     name: 'diff-review',
     version: VERSION,
   });
-  registerMcpTools(server, sessionRegistrar, mcpLog);
+  registerMcpTools(server, sessionRegistrar, mcpLog, mcpTargetResolver);
   return server;
 }
 
@@ -82,6 +88,7 @@ export async function main() {
     });
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  startTargetHeartbeat(mcpTargetResolver, mcpLog);
   mcpLog('MCP server ready');
 }
 

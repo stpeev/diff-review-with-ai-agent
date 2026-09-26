@@ -1,6 +1,6 @@
 # MCP Reconnect After a VS Code Restart
 
-**Status:** proposed
+**Status:** implemented
 **Date:** 2026-09-24
 
 ## Problem

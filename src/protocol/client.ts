@@ -5,6 +5,17 @@ export interface IpcTarget {
   matchedRoot: string | null;
 }
 
+/** The server answered with an error status, so the request did reach a window. */
+export class IpcHttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = 'IpcHttpError';
+  }
+}
+
 export function getIpcJson<T>(endpoint: string, target: IpcTarget, timeoutMs = 5_000): Promise<T> {
   return requestJson<T>(target, endpoint, 'GET', undefined, timeoutMs);
 }
@@ -49,14 +60,20 @@ function requestJson<T>(
 
           if (response.statusCode === 409) {
             reject(
-              new Error(
+              new IpcHttpError(
                 `This request was routed to a window scoped to [${asStringList(result.have).join(', ') || 'no workspace folder'}], ` +
                   `not the workspace this call expected (${target.matchedRoot}). Another VS Code window may own your comments — ` +
                   'run "Diff Review: Show MCP Server Info" to check.',
+                409,
               ),
             );
           } else if (response.statusCode && response.statusCode >= 400) {
-            reject(new Error(typeof result.error === 'string' ? result.error : `HTTP ${response.statusCode}`));
+            reject(
+              new IpcHttpError(
+                typeof result.error === 'string' ? result.error : `HTTP ${response.statusCode}`,
+                response.statusCode,
+              ),
+            );
           } else {
             resolve(result as T);
           }
